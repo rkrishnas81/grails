@@ -1,0 +1,4 @@
+Realm [gov.ca.hcd.security.DbRealm@29e2b49f] does not support authentication token 
+[org.apache.shiro.authc.UsernamePasswordToken - myuser name, rememberMe=false].  
+Please ensure that the appropriate Realm implementation is configured correctly or that the 
+realm accepts AuthenticationTokens of this type.
