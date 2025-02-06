@@ -1,0 +1,645 @@
+package org.ca.xyz.security
+
+import gov.ca.xyz.casas.util.MiscUtil
+import gov.ca.xyz.common.CommonCode
+//import gov.ca.xyz.notification.NotificationService //TODO: UPGRADE - add service
+import gov.ca.xyz.security.*
+import gov.ca.xyz.uif.FrameworkCode
+import org.apache.shiro.SecurityUtils
+import org.apache.shiro.authc.AuthenticationException
+import org.apache.shiro.authc.UsernamePasswordToken
+import org.apache.shiro.crypto.hash.Sha512Hash
+import org.apache.shiro.subject.Subject
+import org.joda.time.DateTime
+import org.joda.time.Interval
+
+import java.sql.CallableStatement
+import java.sql.Connection
+
+/**
+ * Controls Security User Interface Functionality
+ */
+class AuthController {
+
+    def simpleCaptchaService
+    def xyzMailService
+    def commonService
+    def sessionFactory
+
+    /**
+     * Default action for controller.
+     */
+    def index = {
+        render view: "/index"
+    }
+
+    /**
+     *  Shows the login page
+     */
+    def login = {
+        render view: "/index"
+    }
+
+    /**
+     * Sign in to application
+     */
+    def signIn = {
+        withForm {
+            String username = params.username ? (params.username as String)?.trim()?.toUpperCase() : ""
+
+            def authToken = new UsernamePasswordToken(username, params.password as String)
+
+            //always forward to index page after login
+            def targetUri = "/"
+
+            String userAgent = request.getHeader("User-Agent")
+            def additionalInfoStrings = []
+
+            String userBrowser = ""
+            Boolean blockBrowser = false
+            String userOs = ""
+            Boolean blockOs = false
+            (userBrowser, blockBrowser) = commonService.getBrowserName(userAgent)
+            (userOs, blockOs) = commonService.getOsName(userAgent)
+            Boolean block = blockBrowser || blockOs
+            if (block) {
+                additionalInfoStrings.add("REQUEST BLOCKED")
+            }
+
+            String userIpAddress = request.getRemoteAddr()
+            additionalInfoStrings.add("Username: ${username}")
+
+            LoginLog loginLog = new LoginLog(
+                    logDate: new Date(),
+                    userBrowser: userBrowser,
+                    userOs: userOs,
+                    userIpAddress: userIpAddress,
+                    userAgent: userAgent,
+                    additionalInfo: additionalInfoStrings.join(', ')
+            )
+
+            if (block) {
+                loginLog.success = false
+                loginLog.save(flush: true)
+                return false
+            }
+
+            try {
+                User user = User.findByUsername(username)
+                if (user) {
+                    loginLog.userId = user.id
+                    loginLog.username = user.username
+                    loginLog.userFirstName = user.firstName
+                    loginLog.userLastName = user.lastName
+
+                    if (!user.internalUser) {
+                        loginLog.success = false
+                        throw new AuthenticationException()
+                    } else {
+                        SecurityUtils.subject.login(authToken) //throws AuthenticationException if fails, so won't set success
+                        loginLog.success = true
+
+                        if(user?.adminUser()) {
+                            session.setAttribute('MONITOR_OK', 'TRUE')
+                        }
+                    }
+                } else {
+                    throw new AuthenticationException()
+                }
+
+                //logout if account disabled or locked
+                Boolean accountDisabled = !user.enabled
+                Boolean accountLocked = user.accountLocked && (!user.accountLockExpirationDate || user.accountLockExpirationDate?.after(new Date()))
+                if (accountDisabled || accountLocked) {
+                    SecurityUtils.subject.logout()
+                    loginLog.success = false
+                    throw new org.apache.shiro.authc.AuthenticationException(message(code: "sec.account.locked.or.disabled", default: "User Account is locked or disabled."))
+                }
+
+                //reset account locking data since login was successful
+                if (user.failedLoginAttempts || user.accountLocked || user.accountLockExpirationDate) {
+                    user.failedLoginAttempts = 0
+                    user.accountLocked = false
+                    user.accountLockExpirationDate = null
+                    user.save(flush: true)
+                }
+
+                loginLog.save(flush: true)
+
+                if (user.passwordHash == SecurityUtil.DEFAULT_PASSWORD_HEX) {
+                    forward(controller: 'auth', action: 'updatePassword', model: [redirectedToPassword: 'TRUE'])
+                } else {
+                    redirect(uri: targetUri)
+                }
+            }
+            catch (AuthenticationException ex) {
+                log.info "Authentication failure for user '${username}'."
+                flash.error = message(code: "sec.login.failed", default: "Invalid username and/or password.")
+
+                //increment failed login attempts or lock the account
+                User user = User.findByUsername(username)
+
+                if (user) {
+                    user.failedLoginAttempts++
+                    Integer maxFailedLoginAttempts = FrameworkCode.findByCategoryAndCode("CONFIG", "MAX_FAILED_LOGIN_ATTEMPTS")?.displayValue as Integer
+                    Integer accountLockDuration = FrameworkCode.findByCategoryAndCode("CONFIG", "ACCOUNT_LOCK_DURATION")?.displayValue as Integer
+                    if (maxFailedLoginAttempts && user.failedLoginAttempts >= maxFailedLoginAttempts) {
+                        user.accountLocked = true
+                        if (accountLockDuration) {
+                            def calendar = Calendar.instance
+                            calendar.add(Calendar.MINUTE, accountLockDuration)
+                            user.accountLockExpirationDate = calendar.getTime()
+                        } else {
+                            user.accountLockExpirationDate = null
+                        }
+                        flash.message = message(code: "sec.account.locked.or.disabled", default: "User Account is locked or disabled.")
+                        log.info "Account locked for user '${username}' after ${maxFailedLoginAttempts} failed login attempts."
+                    }
+                    user.save(flush: true)
+                }
+
+                loginLog.success = false
+                loginLog.save(flush: true)
+
+                // Now redirect back to the login page.
+                redirect(url: "/")
+
+            }
+        }.invalidToken {
+            // duplicate request
+            render ''
+        }
+    }
+
+    /**
+     * Sign out of application
+     */
+    def signOut = {
+        // Log the user out of the application.
+        SecurityUtils.subject?.logout()
+
+        //invalidate user's HTTPSession - avoids any session hijacking attacks
+        session.invalidate()
+
+        // Redirect back to the index page.
+        redirect(url: "/")
+    }
+
+    /**
+     * Show unauthorized message or redirect to the login page when user not authorized.
+     */
+    def unauthorized = {
+        Subject currentUser = SecurityUtils.subject
+        if (!currentUser.authenticated || currentUser.principal != SecurityUtil.GUEST_USER) {
+            render "<ul><li>${message(code: "sec.no.access", default: 'You do not have permission to access this page')}</li></ul>"
+            return
+        } else {
+            if (request.xhr) {
+                render(template: "/auth/loginRedirect")
+            } else {
+                redirect(url: "/")
+            }
+        }
+    }
+
+    /**
+     * Show forgot password page
+     */
+    def forgotPassword = {
+    }
+
+    /**
+     * Show update password page
+     */
+    def updatePassword = {
+        render(view: "updatePassword")
+    }
+
+    /**
+     * Save a updated password
+     */
+    def doUpdatePassword = { PasswordCommand passwordCommand ->
+        withForm {
+            if (passwordCommand.hasErrors()) {
+                render(view: "updatePassword", model: [passwordCommand: passwordCommand, redirectedToPassword: params.redirectedToPassword])
+                return
+            } else {
+                def user = User.findByUsername(SecurityUtils.subject?.principal)
+                if (user) {
+                    user.passwordHash = new Sha512Hash(passwordCommand.password1).toHex()
+                    if (user.save(flush: true)) {
+                        flash.message = message(code: "sec.password.update.success", default: "Password updated successfully.")
+                    } else {
+                        flash.message = message(code: "sec.password.update.failure", default: "Password update failed.")
+                        flash.status = "error"
+                    }
+                } else {
+                    flash.message = message(code: "sec.unknown.user", default: "Unknown user.")
+                    flash.status = "error"
+                }
+            }
+            if (params.redirectedToPassword == 'TRUE') {
+                redirect(url: "/")
+            } else {
+                redirect(controller: 'auth', action: 'updatePassword')
+            }
+        }.invalidToken {
+            // duplicate request
+            render ''
+        }
+    }
+
+    /**
+     * Email a request for a password reset to the user
+     */
+    def sendPasswordResetRequest = {
+        withForm {
+            String username = (params.username as String)?.toUpperCase()
+
+            boolean captchaValid = simpleCaptchaService.validateCaptcha(params.captcha)
+            if (!captchaValid) {
+                flash.error = message(code: "sec.captcha.not.valid", default: "The letters you entered did not match the letters in the image. Please try again.")
+                render(view: "forgotPassword")
+                return
+            }
+
+            def userInstance = null
+
+            if (username) {
+                def c = User.createCriteria()
+                userInstance = c.get {
+                    or {
+                        eq("username", username)
+                        eq("emailAddress", username)
+                    }
+                }
+            }
+
+            if (userInstance) {
+
+                if (userInstance.emailAddress) {
+                    Boolean success = false
+                    def resetRequest = new PasswordResetRequest(user: userInstance)
+                    if (resetRequest.save(flush: true)) {
+                        def mailTo = []
+                        mailTo << userInstance.emailAddress
+                        //String mailSender = NotificationService.CASAS_FROM_EMAIL_ADDRESS //TODO: UPGRADE - add service
+                        String mailSender = "casas2@xyz.ca.gov"
+
+                        String messageSubject = message(code: "sec.password.reset.email.subject", default: "Reset your password")?.toString()
+                        String messageBody = message(code: "sec.password.reset.email.body", default: "You have requested resetting the password on your Codes & Standards Automated System (CASAS) account. Please ignore this message if it was not you who made the request. In order to reset your password please click on this link or copy and paste it into a browser:") +
+                                "\n\n${createLink(absolute: true, controller: 'auth', action: 'resetPassword', id: resetRequest?.token)}\n\n"
+
+                        try {
+                            xyzMailService.sendMail(mailTo, mailSender, messageSubject, messageBody)
+                            success = true
+                            flash.message = message(code: "sec.password.reset.email.sent", default: "An email was sent to you with instructions on how to reset your password.")
+                        } catch (Exception e) {
+                            log.error("Exception sending email", e)
+                            flash.error = message(code: "sec.password.reset.email.failure", default: "Failed to reset password. Email server unavailable. Please try again later.")
+                        }
+                    }
+                    if (success) {
+                        redirect(url: "/")
+                    } else {
+                        redirect(controller: "auth", action: "forgotPassword")
+                    }
+                } else {
+                    flash.error = message(code: "sec.forgot.password.no.email", default: "User does not have an email on file. Unable to reset password.")
+                    redirect(controller: 'auth', action: 'forgotPassword')
+                }
+            } else {
+                flash.error = message(code: "sec.no.user", default: "User not found.")
+                redirect(controller: 'auth', action: 'forgotPassword')
+            }
+        }.invalidToken {
+            // duplicate request
+            render ''
+        }
+    }
+
+    /**
+     * Show the password reset screen
+     */
+    def resetPassword = {
+        if (params.id) {
+            def resetRequest = PasswordResetRequest.findByToken(params.id)
+            if (resetRequest) {
+                [token: resetRequest.token]
+            } else {
+                flash.message = message(code: "default.not.valid.request", default: "Not a valid request.")
+                redirect(url: "/")
+            }
+        }
+    }
+
+    /**
+     * Save the new password
+     */
+    def doResetPassword = { PasswordCommand passwordCommand ->
+        withForm {
+            def resetRequest = (params.token ? PasswordResetRequest.findByToken(params.token) : null)
+            def userInstance = resetRequest?.user
+            if (userInstance) {
+                if (passwordCommand.hasErrors()) {
+                    render(view: "resetPassword", model: [token: resetRequest.token, passwordCommand: passwordCommand])
+                } else {
+                    //update password
+                    userInstance.passwordHash = new Sha512Hash(passwordCommand.password1).toHex()
+
+                    //reset account
+                    userInstance.accountLockExpirationDate = null
+                    userInstance.accountLocked = false
+                    userInstance.failedLoginAttempts = 0
+
+                    if (userInstance.save(flush: true)) {
+                        resetRequest?.delete()
+                        flash.message = message(code: "sec.password.update.success", default: "Password updated successfully.")
+                    } else {
+                        flash.message = message(code: "sec.password.update.failure", default: "Password update failed.")
+                    }
+
+                    redirect(url: "/")
+                }
+            } else {
+                flash.status = "error"
+                flash.message = message(code: "sec.unknown.user", default: "Unknown user.")
+                redirect(action: 'resetPassword', id: params.token)
+            }
+        }.invalidToken {
+            // duplicate request
+            render ''
+        }
+    }
+
+    /**
+     * Shows user profile page
+     * @return
+     */
+    def profile() {
+        def userInstance = User.findByUsername(SecurityUtils.subject?.principal)
+        if (!userInstance) {
+            flash.message = message(code: 'default.not.found.message', args: [message(code: 'user.label', default: 'User'), params.id])
+        }
+        render(view: "profile", model: [userInstance: userInstance])
+    }
+
+    /**
+     * Saves changes to a user profile
+     * @return
+     */
+    def saveProfile() {
+        withForm {
+            def userInstance = User.findByUsername(SecurityUtils.subject?.principal)
+
+            if (!userInstance) {
+                flash.message = message(code: 'default.not.found.message', args: [message(code: 'user.label', default: 'User'), params.id])
+                redirect(action: "list", params: [timestamp: new Date().getTime()])
+                return
+            }
+
+            if (params.phoneNumber) {
+                params.phoneNumber = params.phoneNumber?.replaceAll("[^\\d]", "")
+            }
+
+            userInstance.properties = params
+
+            if (!userInstance.save(flush: true)) {
+                render(view: "profile", model: [userInstance: userInstance])
+                return
+            }
+
+            flash.message = message(code: 'user.saved.message')
+            redirect(action: "profile", id: userInstance.id, params: [timestamp: new Date().getTime()])
+        }.invalidToken {
+            // duplicate request
+            render ''
+        }
+    }
+
+    /**
+     * Provides page where admin user can manage user passwords
+     */
+    def passwordManagement() {
+        flash.clear()
+        User userInstance = null
+        if (params.id) {
+            userInstance = User.read(params.id as Long)
+        }
+        render(view: "passwordManagement", model: [userInstance: userInstance])
+    }
+
+    /**
+     * Saves password change
+     */
+    def savePasswordChange = { PasswordCommand passwordCommand ->
+        withForm {
+            User userInstance = User.get(params.id)
+            if (passwordCommand.hasErrors()) {
+                render(view: "passwordManagement", model: [passwordCommand: passwordCommand, userInstance: userInstance])
+                return
+
+            } else {
+                userInstance.passwordHash = new Sha512Hash(passwordCommand.password1).toHex()
+                userInstance.accountLocked = false
+                userInstance.accountLockExpirationDate = null
+                userInstance.failedLoginAttempts = 0
+                userInstance.enabled = true //refs CASAS-3579 RT Managers should be able to enable external user accounts
+                if (userInstance.save(flush: true, validate: false)) {
+                    flash.message = message(code: "sec.password.update.success", default: "Password updated successfully.")
+                }
+            }
+
+            render(view: "passwordManagement", model: [userInstance: userInstance])
+        }.invalidToken {
+            // duplicate request
+            render ''
+        }
+    }
+
+    /**
+     * If not an Ajax call then will be redirect to the index page - prevents direct access to pages
+     * Note:  Do not make this method final!  Pages that upload documents will need to override this method.
+     */
+    def beforeInterceptor = {
+
+        // CASAS-3195 pass the real username for the database session currently used
+        String currentUserName = SecurityUtils.subject?.principal?.toString()
+        if(!currentUserName) {
+            //per Ryan, if no user then put request in DB session identifier
+            currentUserName = request.requestURI?.toString()?.replace("/casas/grails/", "")?.replace(".dispatch", "")
+        }
+        Connection c = sessionFactory.currentSession.connection()
+        CallableStatement cs = c.prepareCall("call DBMS_SESSION.SET_IDENTIFIER('$currentUserName')")
+        cs.execute()
+        cs.close()
+
+        Boolean requestLogEnabled = CommonCode.findActiveCode('CONFIG', 'LOG_INTERNAL_REQUESTS')?.subCode == 'ENABLED'
+
+        if (requestLogEnabled) {
+            try {
+
+                String userAgent = request.getHeader("User-Agent")
+                def additionalInfoStrings = []
+                String userBrowser = ""
+                Boolean blockBrowser = false
+                String userOs = ""
+                Boolean blockOs = false
+                if (userAgent) {
+                    (userBrowser, blockBrowser) = commonService.getBrowserName(userAgent)
+                    (userOs, blockOs) = commonService.getOsName(userAgent)
+                } else {
+                    userBrowser = "No information available"
+                    userOs = "No information available"
+                }
+
+                Boolean block = blockBrowser || blockOs
+
+                String userIpAddress = request.getRemoteAddr()
+
+                if (block) {
+                    additionalInfoStrings.add("REQUEST BLOCKED")
+                }
+
+                User currentUser = currentUser()
+
+                def requestParams = params.clone()
+                if(requestParams.password) {
+                    requestParams.password = '*****'
+                }
+                if(requestParams.oldPassword) {
+                    requestParams.oldPassword = '*****'
+                }
+                if(requestParams.password1) {
+                    requestParams.password1 = '*****'
+                }
+                if(requestParams.password2) {
+                    requestParams.password2 = '*****'
+                }
+
+                RequestLog requestLog = new RequestLog(
+                        logDate: new Date(),
+                        userId: currentUser?.id,
+                        username: currentUser?.username,
+                        userFirstName: currentUser?.firstName,
+                        userLastName: currentUser?.lastName,
+                        requestUri: request?.requestURI,
+                        requestParams: MiscUtil.atMost(4000, requestParams?.toString(), '...'),
+                        additionalInfo: additionalInfoStrings.join(', '),
+                        userBrowser: userBrowser,
+                        userOs: userOs,
+                        userIpAddress: userIpAddress,
+                        userAgent: userAgent
+                ).save(flush: true)
+
+                if (requestLog?.id) {
+                    params.requestLogId = requestLog?.id
+                }
+
+                if (block) {
+                    return false
+                }
+
+            } catch (Exception e) {
+                //Too bad - can't block the request because logging failed
+                log.error(e)
+            }
+        }
+    }
+
+    /**
+     * Used to record number of seconds request took
+     */
+    def afterInterceptor = {
+        try {
+            if (params.requestLogId) {
+                Boolean requestLogEnabled = CommonCode.findActiveCode('CONFIG', 'LOG_INTERNAL_REQUESTS')?.subCode == 'ENABLED'
+
+                if (requestLogEnabled) {
+                    RequestLog requestLog = RequestLog.get(params.requestLogId as Long)
+                    if (requestLog) {
+                        if (!requestLog.secondsToComplete) {
+                            DateTime startDateTime = new DateTime(requestLog.logDate)
+                            DateTime endDateTime = new DateTime()
+                            Interval interval = new Interval(startDateTime, endDateTime)
+                            if (interval.toDurationMillis()) {
+                                requestLog.secondsToComplete = interval.toDurationMillis() / 1000
+                            } else {
+                                requestLog.secondsToComplete = 0.0
+                            }
+                            requestLog.save(flush: true)
+                        }
+                    }
+                }
+            }
+
+            // CASAS-3930 Label DB sessions for their purpose
+            Connection c = sessionFactory.currentSession.connection()
+            CallableStatement cs = c.prepareCall("call DBMS_SESSION.SET_IDENTIFIER(null)")
+            cs.execute()
+            cs.close()
+
+        } catch (Exception e) {
+            //Too bad - can't block the request because logging failed
+            log.error(e)
+        }
+    }
+
+    /**
+     * Convenience method for getting current User object
+     */
+    User currentUser() {
+        return User.findByUsername(SecurityUtils.subject?.principal)
+    }
+}
+
+/**
+ * Used to validate password data submitted from GSP
+ */
+class PasswordCommand {
+    String oldPassword
+    String password1
+    String password2
+
+    static constraints = {
+        oldPassword(nullable: true, blank: true, validator: { val, obj ->
+            if (val) {
+                def user = User.findByUsername(SecurityUtils.subject?.principal)
+                if (user?.passwordHash != new Sha512Hash(val).toHex()) {
+                    return ['sec.incorrect.old.password']
+                }
+            }
+        })
+        //require 8-30 characters, 1 letter, 1 number, and no spaces
+        password1(nullable: false, blank: false, matches: /^(?=.*[A-Za-z])(?=.*[0-9])(?!.*\s).{8,30}$/, validator: { val, obj ->
+            if (obj.password2 != val) {
+                return ['user.password1.doesnotmatch']
+            } else if (obj.oldPassword == val) {
+                return ['user.password1.same.as.old.password']
+            } else if (obj.oldPassword?.toUpperCase() == val?.toUpperCase()) {
+                return ['user.password1.similar.to.old.password']
+            }
+        })
+        password2(nullable: true, blank: true)
+    }
+}
+
+/**
+ * Used to validate email data submitted from GSP
+ */
+class EmailCommand {
+
+    String emailAddress
+    String emailAddress2
+
+    static constraints = {
+        emailAddress(nullable: false, blank: false, validator: { val, obj ->
+            if (obj.emailAddress && !obj.emailAddress.equalsIgnoreCase(obj.emailAddress2)) {
+                return ['user.email.doesnotmatch']
+            } else {
+                return true
+            }
+        })
+        emailAddress2(nullable: false, blank: false)
+    }
+}
