@@ -1,0 +1,178 @@
+package gov.ca.hcd.nav
+
+import gov.ca.hcd.security.*
+import gov.ca.hcd.uif.FrameworkCode
+import org.apache.shiro.SecurityUtils
+
+class ViewPage extends BaseDomain {
+
+    String name                         // The name of the view page
+    String description                  // A description of what the view page is used.
+    FrameworkCode pageType              // The type of view page, either Edit, List or Grid (Edit Includes Create)
+    String pageTypeCode                 // The String value pageType
+    String controllerName               // The name of the Grails controller that is associated with the view page
+    String actionName                   // The Controller Action associated with the view page.
+    String url                          // Identifies an internet resource to be displayed
+    Boolean firstViewPage = false       // Indicates if this is the first view page in a flow definition.
+    Boolean lastViewPage = false        // Indicates if this is the last view page in a flow definition.
+    Long dataId                         // Key ID field to the data for this view page
+    ViewPage parentObject               // For sub-flow definitions, this is the parent view page for the child view page
+    String parentFieldName              // The related name for the parent field in the current object being processed by this view page.
+    Map defaults = [:]                  // Provides a means to set the default value of a field within this view page.
+    String viewName                     // View name, if different from action name - used when action is flow, but view is something else
+    Boolean dataRequired = true         // Indicates if the user has to enter data for this page, or can the page be skipped and no data entered.
+    Boolean alwaysNewInstance = false   // Indicates that the flow controller should always create a new domain instance when first showing this page.
+
+    static hasMany = [menuItems: MenuItem, dataItems: DataItem, viewPageRoles: ViewPageRole]
+
+    static belongsTo = [businessDomain: BusinessDomain]
+
+    static transients = ['dataId', 'firstViewPage', 'lastViewPage']
+
+    static constraints = {
+        name(blank: false, nullable: false, unique: true)
+        description(blank: false, nullable: false)
+        pageType(nullable: false)
+        pageTypeCode(blank: true, nullable: true, maxSize: 30)
+        controllerName(blank: true, nullable: true)
+        actionName(blank: true, nullable: true)
+        url(blank: true, nullable: true)
+        parentObject(nullable: true)
+        parentFieldName(blank: true, nullable: true)
+        defaults(nullable: true)
+        viewName(blank: true, nullable: true, maxSize: 50)
+        dataRequired(nullable: true)
+        alwaysNewInstance(nullable: true)
+    }
+
+    static mapping = {
+        cache usage: 'nonstrict-read-write', include: 'non-lazy'
+        table 'NAV_VIEW_PAGES'
+        id generator: 'sequence', params: [sequence: 'nav_view_page_seq']
+        pageType lazy: false
+        parentObject lazy: false
+        businessDomain lazy: false
+        menuItems lazy: false
+        dataItems lazy: false
+        viewPageRoles lazy: false, cascade: "all-delete-orphan"
+        dataRequired lazy: false
+        alwaysNewInstance lazy: false
+    }
+
+    /**
+     * Returns short String representation of the object
+     * @return String
+     */
+    String display() {
+        return name
+    }
+
+    /**
+     * Returns long String representation of the object for use in search result detail
+     * @return String
+     */
+    String searchDisplay() {
+        return name
+    }
+
+    // Used to populate select
+    static listByProgram(Program program) {
+        def viewPages = ViewPage.executeQuery("select distinct vp.controllerName from ViewPage vp join vp.businessDomain bd where bd.parentProgram.id = :id order by vp.controllerName", [id: program.id])
+        return viewPages
+    }
+
+    // Used to populate list page
+    static findAllByProgram(Program program) {
+        return ViewPage.findAllByBusinessDomainInList(BusinessDomain.findAllByParentProgram(program))
+    }
+
+    static findByProgramAndControllerName(params) {
+        if (params?.controllerName && params?.controllerName != '') {
+            return ViewPage.findAllByBusinessDomainInList(BusinessDomain.findAllByParentProgram(params?.program), [max: params.max, sort: params.sort, order: params.order, offset: params.offset]).findAll { it -> it.controllerName == params?.controllerName }
+        } else {
+            return ViewPage.findAllByBusinessDomainInList(BusinessDomain.findAllByParentProgram(params?.program), [max: params.max, sort: params.sort, order: params.order, offset: params.offset])
+        }
+    }
+
+    static customCount(params) {
+        if (params?.controllerName && params?.controllerName != '') {
+            def theList = ViewPage.findAllByBusinessDomainInList(BusinessDomain.findAllByParentProgram(params?.program)).findAll { it -> it.controllerName == params?.controllerName }
+            return theList.size()
+        } else {
+            def theList = ViewPage.findAllByBusinessDomainInList(BusinessDomain.findAllByParentProgram(params?.program))
+            return theList.size()
+        }
+    }
+
+    static findAllByBusinessDomainId(Long id) {
+        BusinessDomain businessDomain = BusinessDomain.findById(id)
+        return ViewPage.findAllByBusinessDomain(businessDomain)
+    }
+
+    static PageSecurity pageSecurity(def viewPageId) {
+
+        PageSecurity pageSecurity = new PageSecurity()
+        def user = User.findByUsername(SecurityUtils.subject?.principal)
+        Integer pageLevelPermissions = 0
+        def fieldLevelPermissions = [:]
+        Long securedViewPageId
+        ViewPage securedViewPage
+
+        try { securedViewPageId = viewPageId as Long } catch (Exception e) {}
+        if (securedViewPageId) {
+            securedViewPage = ViewPage.get(securedViewPageId)
+        } else {
+
+            def viewPageRoleCriteria = ViewPageRole.createCriteria()
+            def viewPages = viewPageRoleCriteria.list {
+                viewPage {
+                    eq('controllerName', params.controller)
+                    eq('actionName', params.action)
+                }
+                'in'("role", user?.roles)
+                order("permission", "desc")
+            }
+            if (viewPages) securedViewPage = viewPages[0]?.viewPage
+
+        }
+
+        if (securedViewPage) {
+
+            def viewPageCriteria = ViewPageRole.createCriteria()
+            def viewPageRoles = viewPageCriteria.list {
+                eq("viewPage", securedViewPage)
+                'in'("role", user?.roles)
+                order("permission", "desc")
+            }
+            if (viewPageRoles) pageLevelPermissions = viewPageRoles[0]?.permission
+            else pageLevelPermissions = 0
+
+
+            def dataItemCriteria = DataItemRole.createCriteria()
+            def dataItemRoles = dataItemCriteria.list {
+                dataItem {
+                    eq("viewPage", securedViewPage)
+                }
+                'in'("role", user?.roles)
+                order("permission", "asc")
+            }
+            dataItemRoles?.each {
+                fieldLevelPermissions."${it.dataItem?.fieldName}" = "${it.permission}" as Integer
+            }
+
+
+            pageSecurity.viewPageId = securedViewPage.id
+            pageSecurity.controllerName = securedViewPage.controllerName
+            pageSecurity.actionName = securedViewPage.actionName
+            pageSecurity.firstViewPage = securedViewPage.firstViewPage
+            pageSecurity.lastViewPage = securedViewPage.lastViewPage
+            pageSecurity.pageLevelPermissions = pageLevelPermissions
+            pageSecurity.fieldLevelPermissions = fieldLevelPermissions
+            pageSecurity.createActions = FrameworkCode.findByCategoryAndCode('CONFIG', 'CREATE_ACTIONS')?.displayValue?.split(",")?.collect { it.trim() }
+            pageSecurity.updateActions = FrameworkCode.findByCategoryAndCode('CONFIG', 'UPDATE_ACTIONS')?.displayValue?.split(",")?.collect { it.trim() }
+        }
+
+        return pageSecurity
+    }
+}
+

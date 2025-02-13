@@ -1,0 +1,110 @@
+package gov.ca.hcd.nav
+
+import gov.ca.hcd.common.CommonCode
+import gov.ca.hcd.security.BaseDomain
+import gov.ca.hcd.security.Program
+
+/**
+ * The Menu Item class contains the menu items displayed in the navigation pane for the CASAS 2.0 application.
+ * A menu item can display a view page.  The menu item that each user sees is governed
+ * by their role and the roles assigned to each menu item.  Menu Items can have child menu items.  Pressing the
+ * parent menu item expands the list of child menu items.  Parent menu items that contain children menu items
+ */
+class MenuItem extends BaseDomain {
+
+    MenuItem parentMenuItem       // Child menu items all reference their parent menu item
+    String name                   // The name of the menu item that is displayed to the user
+    String description            // A description of what the menu item activates
+    Integer displayOrder          // The order that the menu items are displayed
+    CommonCode appMode            // APP_MODE category common code. BATCH, TRAN, or BOTH. BATCH show up in Batch App, TRAN show up in CASAS app, and BOTH show up in both.
+
+    static belongsTo = [viewPage: ViewPage, parentProgram: Program]
+    static hasMany = [menuItemRoles: MenuItemRole]
+
+    static constraints = {
+        name(blank: false, nullable: false)
+        description(blank: false, nullable: false)
+        parentMenuItem(nullable: true)
+        displayOrder(nullable: false)
+        viewPage(nullable: true)
+        appMode(nullable: true)
+    }
+
+    static mapping = {
+        cache usage: 'nonstrict-read-write', include: 'non-lazy'
+        table 'NAV_MENU_ITEMS'
+        id generator: 'sequence', params: [sequence: 'nav_menu_item_seq']
+        parentMenuItem column: 'PARENT_MENU_ITEM_ID', index: 'NAV_MENU_ITEMS_PARENT_MENU_IDX'
+        parentProgram column: 'PARENT_PROGRAM_ID', index: 'NAV_MENU_ITEMS_PARENT_PRG_IDX'
+        viewPage column: 'VIEW_PAGE_ID', index: 'NAV_MENU_ITEMS_VIEW_PAGE_IDX'
+    }
+
+    /**
+     * This method builds and returns the GSP tag to display the menu item in a view page.
+     * @param mode
+     * @return
+     */
+    String menuText(mode = 'view') {
+        String text
+        if (viewPage) {
+            if (viewPage.controllerName && viewPage.actionName) {
+                String linkParams = "'viewPageId':'${viewPage.id}'"
+                viewPage.defaults?.each {
+                    linkParams += ",'${it.key}':'${it.value}'"
+                }
+                text = '        <g:link controller="' + viewPage.controllerName + '" action="' + viewPage.actionName + '" msg="${message(code: \'default.button.back.confirm.message\', default: \'Are you sure?\')}"' + ' subprogram="' + parentProgram.name + '" subprogramAcronym="' + parentProgram.acronym + '" menuItemId="menuItem-' + this.id + '" params="[' + linkParams + ']">' + name + '</g:link>'
+            } else if (viewPage.url) {
+                if (mode == 'test') {
+                    text = '        <a>' + name + ' ' + viewPage.url + '</a>'
+                } else {
+                    text = '        <g:link url="' + viewPage.url + '" target="_blank" msg="${message(code: \'default.button.back.confirm.message\', default: \'Are you sure?\')}"' + ' subprogram="' + parentProgram.name + '" subprogramAcronym="' + parentProgram.acronym + '" menuItemId="menuItem-' + this.id + '">' + name + '</g:link>'
+                }
+            } else {
+                text = '        <a class="no-ajax">Invalid Link Specification For ' + name + '</a>'
+            }
+        } else {
+            text = '        <a class="submenu no-ajax">' + name + '</a>'
+        }
+        return text
+    }
+
+    /**
+     * Returns short String representation of the object
+     * @return String
+     */
+    String display() {
+        return name
+    }
+
+    /**
+     * Returns long String representation of the object for use in search result detail
+     * @return String
+     */
+    String searchDisplay() {
+        return name
+    }
+
+    /**
+     * Returns full location of menu item, including parent menu items
+     * @return
+     */
+    String getFullLocation() {
+        StringBuilder fullLocationSb = new StringBuilder()
+        if (parentMenuItem) {
+            addParentMenu(parentMenuItem, fullLocationSb)
+        }
+        fullLocationSb.append(name)
+        return fullLocationSb.toString()
+    }
+
+    /**
+     * Used to add parent menu items to full location
+     */
+    def addParentMenu(MenuItem parentMenuItem, StringBuilder fullLocationSb) {
+        if (parentMenuItem.parentMenuItem) {
+            addParentMenu(parentMenuItem.parentMenuItem, fullLocationSb)
+        }
+        fullLocationSb.append("${parentMenuItem.name} >> ")
+    }
+
+}
