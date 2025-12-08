@@ -1,0 +1,79 @@
+---
+pr:
+  - release/dev
+
+variables:
+  system.debug: "false"
+  JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+name: 3.0.$(Rev:r)
+jobs:
+  - job: Build
+    displayName: Clean and Build
+    pool:
+      name: Azure VM
+    workspace:
+      clean: outputs
+    steps:
+      - checkout: self
+        persistCredentials: true
+      - task: Checkmarx AST@3
+        inputs:
+          CheckmarxService: 'CxOne'
+          projectName: '$(Build.Repository.Name)'
+          branchName: '$(Build.SourceBranchName)'
+          tenantName: 'hcd'
+
+      - task: Gradle@4
+        inputs:
+          gradleWrapperFile: gradlew
+          tasks: bootJar
+          gradleOptions:
+          publishJUnitResults: false
+          javaHomeOption: Path
+          jdkDirectory: $(JAVA_HOME)
+          sonarQubeRunAnalysis: false
+          spotBugsAnalysis: false
+      - script: |
+          echo "##vso[task.setvariable variable=commitMessage;isOutput=true]$(Build.SourceVersionMessage)"
+          COMMIT_AUTHOR=$(git log --format='%ae' -n 1)
+          echo "##vso[task.setvariable variable=commitAuthor;isOutput=true]$COMMIT_AUTHOR"
+          echo "##vso[task.setvariable variable=version]$(Build.BuildNumber)"
+          echo "Build.SourceVersionMessage: " $(Build.SourceVersionMessage)
+          echo "COMMIT_AUTHOR: " $COMMIT_AUTHOR
+          echo "Build.BuildNumber: " $(Build.BuildNumber)
+        displayName: 'Capture Commit Info and version number'
+      - task: CmdLine@2
+        inputs:
+          script: |
+            echo Copy to Build.ArtifactStagingDirectory
+            cp $(Build.SourcesDirectory)/build/libs/*.jar $(Build.ArtifactStagingDirectory)
+            ls -l $(Build.ArtifactStagingDirectory)
+
+      - task: PublishBuildArtifacts@1
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: 'drop'
+          publishLocation: 'Container'
+      - task: ArchiveFiles@2
+        inputs:
+          rootFolderOrFile: '$(Build.ArtifactStagingDirectory)'
+          includeRootFolder: false
+          archiveType: 'zip'
+          archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+          replaceExistingArchive: true
+      - task: AzureRmWebAppDeployment@5
+        inputs:
+          ConnectionType: 'AzureRM'
+          azureSubscription: 'Azure Non-Prod'
+          appType: 'webAppLinux'
+          WebAppName: 'casas-internal'
+          deployToSlotOrASE: true
+          ResourceGroupName: 'hcd-wus-np-casas-rg-01'
+          SlotName: 'production'
+          packageForLinux: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+          DeploymentTypeLinux: 'oneDeploy'
+
+      - script: |
+          curl -H 'Content-Type: application/json' -d '{"text": "Build succeeded for $(Build.DefinitionName) - $VERSION Triggered by $(commitAuthor)"}' https://prod-10.usgovtexas.logic.azure.us:443/workflows/73d47d8a04784978824492be4e23e0db/triggers/manual/paths/invoke?api-version=2016-06-01
+        displayName: 'Post to Teams'
+
