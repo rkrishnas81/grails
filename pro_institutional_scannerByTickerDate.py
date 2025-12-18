@@ -137,6 +137,35 @@ def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
 
 
 # =============================
+# QQQ LOGIC (ADDED)
+# =============================
+def download_qqq_close(end_date: pd.Timestamp) -> pd.Series:
+    hist = None
+    for attempt in range(3):
+        try:
+            hist = yf.download(
+                "QQQ",
+                period="1y",
+                interval="1d",
+                progress=False,
+                auto_adjust=False,   # IMPORTANT
+                group_by="ticker",
+                threads=True,
+            )
+            break
+        except Exception:
+            time.sleep(0.6 * (2 ** attempt))
+
+    df = _extract_ohlcv(hist, "QQQ")
+    close = df["Close"].copy()
+    close.index = pd.to_datetime(close.index)
+    close = close.loc[close.index <= end_date].dropna()
+    if close.empty:
+        raise SystemExit("❌ QQQ close empty after end_date filter.")
+    return close
+
+
+# =============================
 # FEATURES
 # =============================
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -259,10 +288,21 @@ def main() -> None:
     end_date = roll_end_date(None)
 
     spy_close = download_spy_close(end_date)
+    qqq_close = download_qqq_close(end_date)   # QQQ LOGIC (ADDED)
+
     df = download_history(ticker, end_date)
 
     feats = add_features(df)
     feats = add_relative_strength(feats, spy_close)
+
+    # Next day % change (Close[t+1] vs Close[t])
+    feats["NextDay%"] = (feats["Close"].shift(-1) / feats["Close"] - 1) * 100
+    feats["NextDayOpen%"] = (feats["Open"].shift(-1) / feats["Close"] - 1) * 100
+    feats["NextDayHigh%"] = (feats["High"].shift(-1) / feats["Close"] - 1) * 100
+
+    # QQQ LOGIC (ADDED): what happened to QQQ the NEXT day (same next trading day)
+    aligned_qqq = qqq_close.reindex(feats.index).ffill()
+    feats["NextDayQQQ%"] = (aligned_qqq.shift(-1) / aligned_qqq - 1) * 100
 
     # Compute score for EVERY day
     rows: list[dict] = []
@@ -275,6 +315,31 @@ def main() -> None:
             "Ticker": ticker,
             "Date": feats.index[i].strftime("%Y-%m-%d"),
             "Score": score,
+
+            "NextDay%": (
+                f"{feats.iloc[i].get('NextDay%', np.nan):.2f}%"
+                if np.isfinite(feats.iloc[i].get("NextDay%", np.nan))
+                else ""
+            ),
+
+            # QQQ immediately AFTER NextDay%
+            "NextDayQQQ%": (
+                f"{feats.iloc[i].get('NextDayQQQ%', np.nan):.2f}%"
+                if np.isfinite(feats.iloc[i].get("NextDayQQQ%", np.nan))
+                else ""
+            ),
+
+            "NextDayOpen%": (
+                f"{feats.iloc[i].get('NextDayOpen%', np.nan):.2f}%"
+                if np.isfinite(feats.iloc[i].get("NextDayOpen%", np.nan))
+                else ""
+            ),
+            "NextDayHigh%": (
+                f"{feats.iloc[i].get('NextDayHigh%', np.nan):.2f}%"
+                if np.isfinite(feats.iloc[i].get("NextDayHigh%", np.nan))
+                else ""
+            ),
+
             "BaseScore": base,
             "Bonus": bonus,
             "Close": safe(feats.iloc[i].get("Close", np.nan)),
@@ -288,13 +353,67 @@ def main() -> None:
     # Keep ONLY last 90 trading days
     out = out.tail(90).reset_index(drop=True)
 
-    print("\nLAST 30 DAYS (EVERY DAY SCORE)")
+    # Only score > 60
+    out = out[out["Score"] > 60].reset_index(drop=True)
+
+    # Remove unwanted columns from table/csv
+    out = out.drop(columns=["Close", "Volume", "DollarVol", "RS"])
+
+    print("\nLAST 90 DAYS (ONLY SCORE > 60)")
     print("-" * 110)
-    print(out.tail(30).to_string(index=False))
+    print(out.to_string(index=False))
+
+    # =============================
+    # SUMMARY TABLE (ADDED)
+    # =============================
+    def _pct_str_to_float(v):
+        if isinstance(v, str):
+            v = v.strip().replace("%", "")
+            return float(v) if v else np.nan
+        try:
+            return float(v)
+        except Exception:
+            return np.nan
+
+    _tmp = out.copy()
+    _tmp["NextDay%_num"] = _tmp["NextDay%"].apply(_pct_str_to_float)
+    _tmp["NextDayOpen%_num"] = _tmp["NextDayOpen%"].apply(_pct_str_to_float)
+
+    sum_nextday_when_open_gt0 = float(
+        _tmp.loc[_tmp["NextDayOpen%_num"] > 0, "NextDay%_num"].sum(skipna=True)
+    )
+    sum_open_when_open_lt0 = float(
+        _tmp.loc[_tmp["NextDayOpen%_num"] < 0, "NextDayOpen%_num"].sum(skipna=True)
+    )
+
+    # =============================
+    # FIX (ONLY CHANGE): treat the negative sum as a magnitude (so 8.78 - 1.80)
+    # =============================
+    net = sum_nextday_when_open_gt0 - abs(sum_open_when_open_lt0)
+
+    summary = pd.DataFrame([
+        {"Metric": "Sum of NextDay% when NextDayOpen% > 0", "Value": sum_nextday_when_open_gt0},
+        {"Metric": "Sum of NextDayOpen% when NextDayOpen% < 0", "Value": sum_open_when_open_lt0},
+        {"Metric": "Sum(NextDay%|Open>0) - Sum(Open%|Open<0)", "Value": net},
+    ])
+    summary["Value"] = summary["Value"].map(lambda x: f"{x:.2f}%")
+
+    print("\nSUMMARY")
+    print("-" * 110)
+    print(summary.to_string(index=False))
 
     path = os.path.join(OUTPUT_DIR, f"score_last90_{ticker}.csv")
-    out.to_csv(path, index=False)
-    print(f"\nSaved: {path}")
+
+    # =============================
+    # SAVE FIX (ADDED) - no other changes
+    # =============================
+    while True:
+        try:
+            out.to_csv(path, index=False)
+            print(f"\nSaved: {path}")
+            break
+        except PermissionError:
+            time.sleep(0.5)
 
 
 if __name__ == "__main__":
