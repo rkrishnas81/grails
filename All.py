@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import List, Dict, Tuple
+from typing import List, Dict
 
 import numpy as np
 import pandas as pd
@@ -52,7 +52,7 @@ def safe(x) -> float:
 
 def chunks(lst: List[str], n: int):
     for i in range(0, len(lst), n):
-        yield lst[i : i + n]
+        yield lst[i: i + n]
 
 
 def _extract_ohlcv(hist: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
@@ -94,7 +94,7 @@ def download_history(ticker: str, end_date: pd.Timestamp) -> pd.DataFrame:
                 period="1y",
                 interval="1d",
                 progress=False,
-                auto_adjust=False,   # IMPORTANT
+                auto_adjust=False,  # IMPORTANT
                 group_by="ticker",
                 threads=True,
             )
@@ -276,7 +276,7 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
 
 
 # =============================
-# HISTORY OUTPUT (per ticker): includes BaseScore + Bonus like your file
+# HISTORY OUTPUT (per ticker): PRINT NOTHING unless Net (Gain - Loss) > 2
 # =============================
 def print_history_output(ticker: str, feats_in: pd.DataFrame, qqq_nextday_open_pct: pd.Series) -> None:
     feats = feats_in.copy()
@@ -313,18 +313,11 @@ def print_history_output(ticker: str, feats_in: pd.DataFrame, qqq_nextday_open_p
     out = out[out["Score"] > 60].reset_index(drop=True)
     out.insert(0, "Row", out.index + 1)
 
-    print("\n" + "=" * 90)
-    print(f"HISTORY OUTPUT FOR: {ticker}")
-    print("=" * 90)
-
-    print("\nLAST 90 DAYS (ONLY SCORE > 60)")
-    print("-" * 110)
+    # If no rows, print nothing
     if out.empty:
-        print("(no rows)")
         return
-    print(out.to_string(index=False))
 
-    # SUMMARY
+    # ===== Compute NET first (before printing anything) =====
     _tmp = out.copy()
     _tmp["NextDay%_num"] = _tmp["NextDay%"].apply(_pct_str_to_float)
     _tmp["NextDayOpen%_num"] = _tmp["NextDayOpen%"].apply(_pct_str_to_float)
@@ -337,6 +330,10 @@ def print_history_output(ticker: str, feats_in: pd.DataFrame, qqq_nextday_open_p
         _tmp.loc[_tmp["NextDayOpen%_num"] < 0, "NextDayOpen%_num"].sum(skipna=True)
     ) if not _tmp.empty else 0.0
     net = sum_nextday_when_open_gt0 - abs(sum_open_when_open_lt0)
+
+    # ✅ Gate: PRINT NOTHING unless Net > 2
+    if net <= 2:
+        return
 
     risk_val = float(
         _tmp.loc[_tmp["NextDayOpen%_num"] > 0, "NextDayLow%_num"].min(skipna=True)
@@ -356,6 +353,14 @@ def print_history_output(ticker: str, feats_in: pd.DataFrame, qqq_nextday_open_p
     else:
         risk_open_date = "NONE"
         qqq_day_str = "NONE"
+
+    print("\n" + "=" * 90)
+    print(f"HISTORY OUTPUT FOR: {ticker}")
+    print("=" * 90)
+
+    print("\nLAST 90 DAYS (ONLY SCORE > 60)")
+    print("-" * 110)
+    print(out.to_string(index=False))
 
     print("\n" + "=" * 61)
     print("SUMMARY".center(61))
@@ -455,9 +460,10 @@ def main() -> None:
         .reset_index(drop=True)
     )
 
+    # ✅ DO NOT CHANGE THIS TABLE (your request)
     print(scan_df)
 
-    # History only for tickers in scan table
+    # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
     for t in scan_df["Ticker"].tolist():
         feats = feats_map.get(t)
         if feats is None or feats.empty:
