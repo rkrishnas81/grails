@@ -262,6 +262,10 @@ def main() -> None:
 
     df = download_history(ticker, end_date)
 
+    # (ADDED ONLY FOR YOUR REQUEST): QQQ next-day open % series, so we can print QQQ value on the risk date
+    qqq_df = download_history("QQQ", end_date)
+    qqq_nextday_open_pct = (qqq_df["Open"].shift(-1) / qqq_df["Close"] - 1) * 100
+
     feats = add_features(df)
     feats = add_relative_strength(feats, spy_close)
 
@@ -320,6 +324,7 @@ def main() -> None:
 
     # Only score > 60
     out = out[out["Score"] > 60].reset_index(drop=True)
+    out.insert(0, "Row", out.index + 1)
 
     # Remove unwanted columns from table/csv
     out = out.drop(columns=["Close", "Volume", "DollarVol", "RS"])
@@ -361,11 +366,34 @@ def main() -> None:
     ) if (_tmp["NextDayOpen%_num"] > 0).any() else float("nan")
     risk = f"{risk_val:.2f}%" if np.isfinite(risk_val) and risk_val < 0 else "NONE"
 
+    # =============================
+    # ADDITIONAL RISK (At Open): Min(NextDayOpen%) + SHOW DATE + SHOW QQQ THAT DAY
+    # =============================
+    risk_open_val = float(_tmp["NextDayOpen%_num"].min(skipna=True))
+    risk_open = f"{risk_open_val:.2f}%" if np.isfinite(risk_open_val) else "NONE"
+
+    if np.isfinite(risk_open_val) and not _tmp.empty:
+        # date in YOUR filtered signal table (out/_tmp) where NextDayOpen% is minimum
+        _idx = _tmp["NextDayOpen%_num"].idxmin()
+        risk_open_date = str(_tmp.loc[_idx, "Date"])
+        # QQQ NextDayOpen% on that same date (ffill if missing)
+        qqq_day_val = float(
+            qqq_nextday_open_pct.reindex([pd.to_datetime(risk_open_date)], method="ffill").iloc[0]
+        )
+        qqq_day_str = f"{qqq_day_val:.2f}%" if np.isfinite(qqq_day_val) else "NONE"
+    else:
+        risk_open_date = "NONE"
+        qqq_day_str = "NONE"
+
     summary = pd.DataFrame([
         {"Metric": "Sum of NextDay% when NextDayOpen% (if NextDay%<-1 take -1)", "Value": sum_nextday_when_open_gt0},
         {"Metric": "Sum of NextDayOpen% when NextDayOpen% < 0", "Value": sum_open_when_open_lt0},
         {"Metric": "Sum(NextDay%|Open>0) - Sum(Open%|Open<0)", "Value": net},
         {"Metric": "RISK (Min NextDayLow% when NextDayOpen% > 0)", "Value": risk},
+        {"Metric": "RISK (At Open)", "Value": risk_open},
+        # (ADDED): show the date that produced RISK (At Open), and QQQ NextDayOpen% on that date
+        {"Metric": "RISK (At Open) DATE", "Value": risk_open_date},
+        {"Metric": "QQQ NextDayOpen% ON THAT DATE", "Value": qqq_day_str},
     ])
 
     def _fmt_value(x):
@@ -375,22 +403,26 @@ def main() -> None:
 
     summary["Value"] = summary["Value"].map(_fmt_value)
 
-    print("\nSUMMARY")
-    print("-" * 110)
-    print(summary.to_string(index=False))
-
-    path = os.path.join(OUTPUT_DIR, f"score_last90_{ticker}.csv")
-
     # =============================
-    # SAVE FIX (ADDED) - no other changes
+    # PRINT FORMAT
     # =============================
-    while True:
-        try:
-            out.to_csv(path, index=False)
-            print(f"\nSaved: {path}")
-            break
-        except PermissionError:
-            time.sleep(0.5)
+    print("\n" + "=" * 61)
+    print("SUMMARY".center(61))
+    print("=" * 61 + "\n")
+
+    print(f"  Sum of NextDay% (Open > 0, cap -1%)        : {summary.iloc[0]['Value']:>7}")
+    print(f"  Sum of NextDayOpen% (Open < 0)             : {summary.iloc[1]['Value']:>7}")
+    print(f"  Net (Gain - Loss)                          : {summary.iloc[2]['Value']:>7}")
+
+    print("\n" + "-" * 67 + "\n")
+
+    print(f"  RISK (Worst NextDayLow% | Open > 0)        : {summary.iloc[3]['Value']:>7}")
+    print(f"  RISK (At Open)                             : {summary.iloc[4]['Value']:>7}")
+    # (ADDED): one more row after, as you requested
+    print(f"  DATE of RISK (At Open)                     : {summary.iloc[5]['Value']:>7}")
+    print(f"  QQQ NextDayOpen% on that DATE              : {summary.iloc[6]['Value']:>7}")
+
+    print("\n" + "=" * 67)
 
 
 if __name__ == "__main__":
