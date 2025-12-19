@@ -283,12 +283,7 @@ def main():
 
     print(out_df)
 
-    out_path = os.path.join(
-        OUTPUT_DIR,
-        f"scan_tickers_{end_date.strftime('%Y-%m-%d')}.csv"
-    )
-    out_df.to_csv(out_path, index=False)
-    print(f"\nSaved: {out_path}")
+    
 
 
 if __name__ == "__main__":
