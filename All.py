@@ -38,7 +38,7 @@ def roll_end_date(s: str | None) -> pd.Timestamp:
     return d
 
 
-# ✅ NEW: include the next trading day so shift(-1) has data for "yesterday"
+# ✅ include the next trading day so shift(-1) has data for "yesterday"
 def end_date_plus_one_trading_day(end_date: pd.Timestamp) -> pd.Timestamp:
     return (end_date + BDay(1)).normalize()
 
@@ -108,7 +108,7 @@ def download_history(ticker: str, end_date: pd.Timestamp) -> pd.DataFrame:
 
     df.index = pd.to_datetime(df.index)
 
-    # ✅ CHANGED: keep one extra trading day beyond end_date
+    # keep one extra trading day beyond end_date
     end_plus = end_date_plus_one_trading_day(end_date)
     df = df.loc[df.index <= end_plus]
 
@@ -141,7 +141,7 @@ def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
     close = df["Close"].copy()
     close.index = pd.to_datetime(close.index)
 
-    # ✅ CHANGED: keep one extra trading day beyond end_date
+    # keep one extra trading day beyond end_date
     end_plus = end_date_plus_one_trading_day(end_date)
     close = close.loc[close.index <= end_plus].dropna()
 
@@ -153,7 +153,7 @@ def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
 def download_many(tickers: List[str], end_date: pd.Timestamp) -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
 
-    # ✅ CHANGED: keep one extra trading day beyond end_date
+    # keep one extra trading day beyond end_date
     end_plus = end_date_plus_one_trading_day(end_date)
 
     for batch in chunks(tickers, 60):
@@ -172,7 +172,6 @@ def download_many(tickers: List[str], end_date: pd.Timestamp) -> Dict[str, pd.Da
                 continue
             df.index = pd.to_datetime(df.index)
 
-            # ✅ CHANGED
             df = df.loc[df.index <= end_plus]
 
             if not df.empty:
@@ -182,7 +181,7 @@ def download_many(tickers: List[str], end_date: pd.Timestamp) -> Dict[str, pd.Da
 
 
 # =============================
-# FEATURES (same as your History.py)
+# FEATURES
 # =============================
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
@@ -223,7 +222,7 @@ def add_relative_strength(d: pd.DataFrame, spy_close: pd.Series) -> pd.DataFrame
 
 
 # =============================
-# SCORING (same idea as your History.py)
+# SCORING
 # =============================
 def footprint_score(row: pd.Series) -> float:
     score = 0.0
@@ -252,9 +251,7 @@ def footprint_score(row: pd.Series) -> float:
 
 
 def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
-    if i < 60:
-        return 0.0
-
+    """Match ByDate.py bonus logic exactly (no extra bonus rules, no i<60 cutoff)."""
     r = d.iloc[i]
     bonus = 0.0
 
@@ -271,26 +268,9 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
 
     if np.isfinite(rs) and np.isfinite(rs_sma20) and rs > rs_sma20:
         bonus += 6
+
     if np.isfinite(rs) and np.isfinite(rs20h) and rs >= rs20h * 0.999:
         bonus += 6
-
-    recent = d.iloc[max(0, i - 12): i]
-    if len(recent) > 0:
-        cond = (
-            (recent["DayRetPct"] > 0) &
-            (recent["VolRel"] >= 1.25) &
-            (recent["ClosePos"] >= 0.60)
-        )
-        acc_days = int(cond.sum())
-        if acc_days >= 2:
-            bonus += 8
-        if acc_days >= 3:
-            bonus += 6
-
-    r10 = r.get("RangePct10", np.nan)
-    r20 = r.get("RangePct20", np.nan)
-    if np.isfinite(r10) and np.isfinite(r20) and r10 < r20:
-        bonus += 5
 
     return float(min(35.0, bonus))
 
@@ -411,7 +391,7 @@ def main() -> None:
     end_date = roll_end_date(date_raw if date_raw else None)
 
     MIN_SCORE = 60  # scan table filter so only matches get history
-    MIN_DOLLARVOL = 0  # set to 50_000_000 if you want liquidity filter
+    MIN_DOLLARVOL = 50_000_000  # match ByDate.py liquidity filter
 
     spy_close = download_spy_close(end_date)
 
@@ -475,7 +455,6 @@ def main() -> None:
         .reset_index(drop=True)
     )
 
-    # This print will ALWAYS include BaseScore and Bonus now (no truncation)
     print(scan_df)
 
     # History only for tickers in scan table
