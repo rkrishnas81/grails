@@ -38,6 +38,11 @@ def roll_end_date(s: str | None) -> pd.Timestamp:
     return d
 
 
+# ✅ NEW: include the next trading day so shift(-1) has data for "yesterday"
+def end_date_plus_one_trading_day(end_date: pd.Timestamp) -> pd.Timestamp:
+    return (end_date + BDay(1)).normalize()
+
+
 def safe(x) -> float:
     try:
         return float(x)
@@ -102,7 +107,11 @@ def download_history(ticker: str, end_date: pd.Timestamp) -> pd.DataFrame:
         raise SystemExit(f"❌ No data returned for {ticker}")
 
     df.index = pd.to_datetime(df.index)
-    df = df.loc[df.index <= end_date]
+
+    # ✅ CHANGED: keep one extra trading day beyond end_date
+    end_plus = end_date_plus_one_trading_day(end_date)
+    df = df.loc[df.index <= end_plus]
+
     if df.empty:
         raise SystemExit(f"❌ {ticker} has no rows after end_date filter.")
     return df
@@ -131,7 +140,11 @@ def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
 
     close = df["Close"].copy()
     close.index = pd.to_datetime(close.index)
-    close = close.loc[close.index <= end_date].dropna()
+
+    # ✅ CHANGED: keep one extra trading day beyond end_date
+    end_plus = end_date_plus_one_trading_day(end_date)
+    close = close.loc[close.index <= end_plus].dropna()
+
     if close.empty:
         raise SystemExit("❌ SPY close empty after end_date filter.")
     return close
@@ -139,6 +152,10 @@ def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
 
 def download_many(tickers: List[str], end_date: pd.Timestamp) -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
+
+    # ✅ CHANGED: keep one extra trading day beyond end_date
+    end_plus = end_date_plus_one_trading_day(end_date)
+
     for batch in chunks(tickers, 60):
         hist = yf.download(
             " ".join(batch),
@@ -154,7 +171,10 @@ def download_many(tickers: List[str], end_date: pd.Timestamp) -> Dict[str, pd.Da
             if df is None or df.empty:
                 continue
             df.index = pd.to_datetime(df.index)
-            df = df.loc[df.index <= end_date]
+
+            # ✅ CHANGED
+            df = df.loc[df.index <= end_plus]
+
             if not df.empty:
                 out[t] = df
         time.sleep(0.15)
@@ -162,7 +182,7 @@ def download_many(tickers: List[str], end_date: pd.Timestamp) -> Dict[str, pd.Da
 
 
 # =============================
-# FEATURES (same as your History.py) :contentReference[oaicite:2]{index=2}
+# FEATURES (same as your History.py)
 # =============================
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
@@ -203,7 +223,7 @@ def add_relative_strength(d: pd.DataFrame, spy_close: pd.Series) -> pd.DataFrame
 
 
 # =============================
-# SCORING (same idea as your History.py) :contentReference[oaicite:3]{index=3}
+# SCORING (same idea as your History.py)
 # =============================
 def footprint_score(row: pd.Series) -> float:
     score = 0.0
@@ -276,7 +296,7 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
 
 
 # =============================
-# HISTORY OUTPUT (per ticker): includes BaseScore + Bonus like your file :contentReference[oaicite:4]{index=4}
+# HISTORY OUTPUT (per ticker): includes BaseScore + Bonus like your file
 # =============================
 def print_history_output(ticker: str, feats_in: pd.DataFrame, qqq_nextday_open_pct: pd.Series) -> None:
     feats = feats_in.copy()
@@ -324,7 +344,7 @@ def print_history_output(ticker: str, feats_in: pd.DataFrame, qqq_nextday_open_p
         return
     print(out.to_string(index=False))
 
-    # SUMMARY (kept from your History.py structure :contentReference[oaicite:5]{index=5})
+    # SUMMARY
     _tmp = out.copy()
     _tmp["NextDay%_num"] = _tmp["NextDay%"].apply(_pct_str_to_float)
     _tmp["NextDayOpen%_num"] = _tmp["NextDayOpen%"].apply(_pct_str_to_float)
