@@ -16,7 +16,8 @@ from pandas.tseries.offsets import BDay
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 260)
 pd.set_option("display.max_colwidth", 120)
-
+# ✅ CENTER COLUMN HEADERS
+pd.set_option("display.colheader_justify", "center")
 
 # =============================
 # BASIC HELPERS
@@ -294,16 +295,18 @@ def print_history_output(ticker: str, feats_in: pd.DataFrame, qqq_nextday_open_p
 
         rows.append({
             "Ticker": ticker,
-            "Date": feats.index[i].strftime("%Y-%m-%d"),
+            "Signal Date": feats.index[i].strftime("%Y-%m-%d"),
+            "SignalDay%": (f"{feats.iloc[i].get('DayRetPct', np.nan):.2f}%"
+                           if np.isfinite(feats.iloc[i].get("DayRetPct", np.nan)) else ""),
             "Score": score,
             "NextDay%": (f"{feats.iloc[i].get('NextDay%', np.nan):.2f}%"
-                        if np.isfinite(feats.iloc[i].get("NextDay%", np.nan)) else ""),
+                         if np.isfinite(feats.iloc[i].get("NextDay%", np.nan)) else ""),
             "NextDayOpen%": (f"{feats.iloc[i].get('NextDayOpen%', np.nan):.2f}%"
-                            if np.isfinite(feats.iloc[i].get("NextDayOpen%", np.nan)) else ""),
+                             if np.isfinite(feats.iloc[i].get("NextDayOpen%", np.nan)) else ""),
             "NextDayHigh%": (f"{feats.iloc[i].get('NextDayHigh%', np.nan):.2f}%"
-                            if np.isfinite(feats.iloc[i].get("NextDayHigh%", np.nan)) else ""),
+                             if np.isfinite(feats.iloc[i].get("NextDayHigh%", np.nan)) else ""),
             "NextDayLow%": (f"{feats.iloc[i].get('NextDayLow%', np.nan):.2f}%"
-                           if np.isfinite(feats.iloc[i].get("NextDayLow%", np.nan)) else ""),
+                            if np.isfinite(feats.iloc[i].get("NextDayLow%", np.nan)) else ""),
             "BaseScore": base,
             "Bonus": bonus,
         })
@@ -331,7 +334,7 @@ def print_history_output(ticker: str, feats_in: pd.DataFrame, qqq_nextday_open_p
     ) if not _tmp.empty else 0.0
     net = sum_nextday_when_open_gt0 - abs(sum_open_when_open_lt0)
 
-    # ✅ Gate: PRINT NOTHING unless Net > 2
+    # Gate: PRINT NOTHING unless Net > 2
     if net <= 2:
         return
 
@@ -345,7 +348,7 @@ def print_history_output(ticker: str, feats_in: pd.DataFrame, qqq_nextday_open_p
 
     if np.isfinite(risk_open_val) and not _tmp.empty:
         _idx = _tmp["NextDayOpen%_num"].idxmin()
-        risk_open_date = str(_tmp.loc[_idx, "Date"])
+        risk_open_date = str(_tmp.loc[_idx, "Signal Date"])
         qqq_day_val = float(
             qqq_nextday_open_pct.reindex([pd.to_datetime(risk_open_date)], method="ffill").iloc[0]
         )
@@ -380,11 +383,12 @@ def print_history_output(ticker: str, feats_in: pd.DataFrame, qqq_nextday_open_p
     print("\n" + "=" * 67)
 
 
+
 # =============================
 # MAIN: Scan table + History output ONLY for scan table tickers
 # =============================
 def main() -> None:
-    tickers_raw = input("Enter Tickers (comma separated): ")
+    tickers_raw = "MU,APLD,VWAV,GSIT,RKLB,JMIA,REAL,SNDK,AAOI,LXEO,PL,ZEPP,APPS,WDC,CORZ,ONDS,IREN,RUN,LC,STX,LRCX,SMTC,ARRY,AFRM,APP,BKSY,ASTS,PGY,CEG,AGX,EVLV,BE,PHAT,DASH,BTQ,CRWV,PLTR,SYM,ALAB,LMND,SLDP,GEV,MKSI,RBRK,ALGM,SOFI,KLAC,LITE,KNSL,AMPX,CIEN,TSLA,ADPT,DOCN,NBIS,FSLR,ESTC,BTSG,RDDT,BILL,CRDO,SHOP,HWM,CVNA,BROS,BW,XPEV,VRT,KTOS,TER,TSM,LTBR,MRVL,COHR,DB,MDB,CRCL,GE,EL,EME,UBS,PI,BTDR,RDVT,MELI,VST,U,WSM,CSIQ,TAK,SNOW,RKT,GMED,FIGS,RIOT,GTX,BBAI,GLOB,COMP,NU,FIVE,TXG,ASML,AMZN,SHLS,PEGA,ON,HOOD,AMAT,BILI,DPRO,NOK,GLW,NVST,EXEL,AEHR,OUST,META,APH,FRSH,WING,UAL,NVDA,SITM,ANET,CELH,ALLY,MSFT,CARR,AMD,ZS,AS,PINS,CYRX,EMBJ,LSCC,GOOG,GOOGL,NIO,ONON,PAGS,DOCU,SPT,OKTA,PRCH,ADSK,ACMR,TEAM,NET,VERI,CSCO,CGNX,RLAY,AMKR,VICR,AMBA,C,TTWO,SIEGY,CRWD,RMBS,HIMX,SHC,AVAH,MLI,ASX,SWK,ADI,QCOM,BSX,DDOG,BA,MNST,VIPS,ALK,COMM,TXN,SNPS,VIAV,ING,FDX,PDD,BIDU,RTX,DLO,HSBC,VSAT,DIS,AVGO,INOD,STM,VEEV,NVTS,NTNX,CDNS,OKLO,TEL,EXPE,GRAB,TT,FOX,JCI,CTAS,WDAY,INTU,IR,INTC,CAT,TVTX,MNDY,EH,ROK,PONY,ZTS,ST,MCHP,RCL,BWA,UBER,PSTG,ERIC,VSH,MIR,GS,VTYX,PANW,DKS,GTLB,FUBO,KC,AIP,SE,STNE,BABA,OPRX,VTRS,GM,FICO,MCD,FLS,NEE,EXPD,FFIV,DAL,IOT,CYBR,AKAM,CPNG,DT,VRNS,HLN,TWLO,IBKR,SEDG,FAST,MSCI,IONS,CMI,ZM,FLEX,ATXS,IBN,DKNG,BX,IVZ,ECL,ELAN,APG,RPRX,HDB,BMNR,GRMN,NXPI,V,ENTG,OTEX,CSX,BLK,AON,EMR,ORCL,MCO,CPRT,FLYW,ASAN,AOS,AXP,WRBY,CTSH,MA,SPOT,ADBE,CCL,BKNG,GEHC,HNGE,SCHW,ARM,VCYT,XP,CWAN,FSLY,PATH,EOSE,PAY,VIK,GEO,MMM,TTD,AFL,KO,CFLT,MSTR,BAH,TJX,SONY,EXAS,TRVI,COIN,ICE,ABNB,AAPL,VSTM,HD,CRM,JBL,SOUN,BSY,SWKS,QRVO,ROST,PEP,MSI,ACAD,TDC,ALHC,UL,HUBS,SPGI,KLIC,LIN,JPM,GRRR,FTNT,BAC,NOC,CB,TRI,WMT,HALO,NTAP,NSC,COST,INDV,LMT,DOCS,IDCC,HIMS,UNP,FTV,MS,DECK,HON,LQDA,NFLX,PM,BG,XOM,FISV,IBM,MO,FIS,WFC,HPE,MMYT,DE,FIG,DUOL,ORLY,RBLX,MARA,ZBRA,PG,ACN,FOLD,ADP,OTIS,CLS,NOW,AMT,MORN,ARQT,ELF,CL,CME,TNGX,GALT,PAYX,TEM,COGT,DELL,GLUE,NKTR,FDS,INSM,MVST,FCEL,MBLY,S,AI,FIVN,CEVA,FLNC,T,WTAI,JD,SMCI,BIP,NNE,BOTZ,VZ,HXSCL,AVT,IONQ,CHAT,TRFK,SYNA,TCEHY,GIB,NVT,CAMT,ARW,CHKP,TMUS,MTZ,SAP,ETN,SYK,SMH,TLN,PWR,FN,ISRG,MPWR,FIX,EQIX,RGTI,LOW,SFM,LULU,LEN,TMDX,GLD,AGQ,ALB,LUNR,BMRN,CUK,UUUU,AXTI"
     date_raw = input("Enter Date YYYY-MM-DD (default ): ").strip()
 
     os.system("cls" if os.name == "nt" else "clear")
