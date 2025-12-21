@@ -336,6 +336,28 @@ def print_history_output(
     # If no rows, print nothing
     if out.empty:
         return
+    # ==========================================================
+    # EXCLUDE RULE (applies to BOTH default date and typed date):
+    # If bar_date is the latest signal date AND the prior trading
+    # day is also a signal date, then DO NOT print this table.
+    # ==========================================================
+    bar_dates = feats.index[feats.index <= end_date]
+    if len(bar_dates) >= 2:
+        bar_date = bar_dates[-1]
+        prev_date = bar_dates[-2]
+
+        bar_str = pd.to_datetime(bar_date).strftime("%Y-%m-%d")
+        prev_str = pd.to_datetime(prev_date).strftime("%Y-%m-%d")
+
+        latest_signal_str = str(out["Signal Date"].max())
+
+        bar_is_signal = (out["Signal Date"] == bar_str).any()
+        prev_is_signal = (out["Signal Date"] == prev_str).any()
+
+        # If the latest signal is the bar date AND prior day also signal -> suppress all history output
+        if bar_is_signal and prev_is_signal and bar_str == latest_signal_str:
+            return
+
 
     # ===== Compute NET first (before printing anything) =====
     _tmp = out.copy()
@@ -500,15 +522,15 @@ def main() -> None:
     print("\nHistory Table Exclude Rules")
     print("1) Net (Gain - Loss) < 2%")
     print("2) If single date input AND SignalDay% > 12%")
-    print("Sum of NextDay% (Open > 0, cap -1%) means")
-    print("                        Open>0 and Low <-1  then -1")
-    print("                        Open>0 and Lw >-1 then nextday is it correct?")
-
-    print("")
-    print("Sum of NextDayOpen% (Open < 0)")
-    print("Sum of NextDayOpen% (Open < 0)  means")
+    print("  Sum of NextDay% (Open > 0, cap -1%) means")
+    print("  Open>0 and Low <-1  then -1")
+    print("  Open>0 and Low >-1 then nextday ")
+    
+ 
+    print("  Sum of NextDayOpen% (Open < 0)  means")
     print("                        if Open<0 sum(Open)")
-
+    print("3) Input Date or Default input date is latest signal date; latest signal date of previous working day also signal day (Consecutive or repeated days  doesn\'t work. repeated not handledd only preivious day handled)")
+    
 
     # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
     for t in scan_df["Ticker"].tolist():
