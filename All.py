@@ -477,6 +477,16 @@ def print_history_output(
 
     print("\n" + "=" * 61)
     print("SUMMARY".center(61))
+    # --- Current Score = latest signal day score ---
+    bar_dates = feats.index[feats.index <= end_date]
+    if len(bar_dates) > 0:
+        bar_date = bar_dates[-1]
+        i = int(feats.index.get_loc(bar_date))
+        current_score = float(min(
+            100.0,
+            footprint_score(feats.iloc[i]) + confirmation_bonus(feats, i)
+        ))
+        print(f"Current Score: {current_score:.1f}")
 
 
        
