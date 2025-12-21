@@ -598,6 +598,13 @@ def main() -> None:
     print("  Sum of NextDayOpen% (Open < 0)  means")
     print("                        if Open<0 sum(Open)")
     print("3) Input Date or Default input date is latest signal date; latest signal date of previous working day also signal day (Consecutive or repeated days  doesn\'t work. repeated not handledd only preivious day handled)")
+    print("4) Score Rules")
+    print("    60+ ignore or watchlist, 70+ is good, 80+ is great, 90+ is rare and dangerous.") 
+    
+    print("5)SignalDay good Score But not price much like 1% if next day below rules , buying point")
+    print("   Price stays above signal-day low")
+    print("   Volume is lower than signal day")
+    print("   Candle closes above its midpoint")
 
     # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
     for t in scan_df["Ticker"].tolist():
