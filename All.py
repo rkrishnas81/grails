@@ -344,11 +344,24 @@ def print_history_output(
     _tmp["NextDayLow%_num"] = _tmp["NextDayLow%"].apply(_pct_str_to_float)
 
     sum_nextday_when_open_gt0 = float(
-        _tmp.loc[_tmp["NextDayOpen%_num"] > 0, "NextDay%_num"].clip(lower=-1).sum(skipna=True)
+        np.where(
+            (_tmp["NextDayOpen%_num"] > 0) & (_tmp["NextDayLow%_num"] < -1),
+            -1.0,
+            np.where(
+                (_tmp["NextDayOpen%_num"] > 0),
+                _tmp["NextDay%_num"],
+                0.0
+            )
+        ).sum()
     ) if not _tmp.empty else 0.0
+
     sum_open_when_open_lt0 = float(
-        _tmp.loc[_tmp["NextDayOpen%_num"] < 0, "NextDayOpen%_num"].sum(skipna=True)
+        _tmp.loc[
+            _tmp["NextDayOpen%_num"] < 0,
+            "NextDayOpen%_num"
+        ].sum(skipna=True)
     ) if not _tmp.empty else 0.0
+
     net = sum_nextday_when_open_gt0 - abs(sum_open_when_open_lt0)
 
     # Gate: PRINT NOTHING unless Net > 2
@@ -487,6 +500,15 @@ def main() -> None:
     print("\nHistory Table Exclude Rules")
     print("1) Net (Gain - Loss) < 2%")
     print("2) If single date input AND SignalDay% > 12%")
+    print("Sum of NextDay% (Open > 0, cap -1%) means")
+    print("                        Open>0 and Low <-1  then -1")
+    print("                        Open>0 and Lw >-1 then nextday is it correct?")
+
+    print("")
+    print("Sum of NextDayOpen% (Open < 0)")
+    print("Sum of NextDayOpen% (Open < 0)  means")
+    print("                        if Open<0 sum(Open)")
+
 
     # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
     for t in scan_df["Ticker"].tolist():
