@@ -484,6 +484,9 @@ def main() -> None:
 
     # ✅ DO NOT CHANGE THIS TABLE (your request)
     print(scan_df)
+    print("\nHistory Table Exclude Rules")
+    print("1) Net (Gain - Loss) < 2%")
+    print("2) If single date input AND SignalDay% > 12%")
 
     # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
     for t in scan_df["Ticker"].tolist():
