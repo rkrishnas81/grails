@@ -390,10 +390,6 @@ def print_history_output(
     if net <= 2:
         return
 
-    risk_val = float(
-        _tmp.loc[_tmp["NextDayOpen%_num"] > 0, "NextDayLow%_num"].min(skipna=True)
-    ) if (not _tmp.empty and (_tmp["NextDayOpen%_num"] > 0).any()) else float("nan")
-    risk = f"{risk_val:.2f}%" if np.isfinite(risk_val) and risk_val < 0 else "NONE"
 
     risk_open_val = float(_tmp["NextDayOpen%_num"].min(skipna=True)) if not _tmp.empty else float("nan")
     risk_open = f"{risk_open_val:.2f}%" if np.isfinite(risk_open_val) else "NONE"
@@ -427,7 +423,6 @@ def print_history_output(
 
     print("\n" + "-" * 67 + "\n")
 
-    print(f"  RISK (Worst NextDayLow% | Open > 0)        : {risk}")
     print(f"  RISK (At Open)                             : {risk_open}")
     print(f"  DATE of RISK (At Open)                     : {risk_open_date}")
     print(f"  QQQ NextDayOpen% on that DATE              : {qqq_day_str}")
