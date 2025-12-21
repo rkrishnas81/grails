@@ -19,6 +19,7 @@ pd.set_option("display.max_colwidth", 120)
 # ✅ CENTER COLUMN HEADERS
 pd.set_option("display.colheader_justify", "center")
 
+
 # =============================
 # BASIC HELPERS
 # =============================
@@ -81,6 +82,35 @@ def _pct_str_to_float(v):
         return float(v)
     except Exception:
         return np.nan
+
+
+# =============================
+# ✅ NEW: SAME NET CALC, BUT FOR ANY SUBSET (NO LOGIC CHANGE)
+# =============================
+def _net_stats(df: pd.DataFrame) -> dict:
+    """Returns Gain/Loss/Net using EXACT same rules as your current Net calc."""
+    if df is None or df.empty:
+        return {"gain": 0.0, "loss": 0.0, "net": 0.0}
+
+    gain = float(
+        np.where(
+            (df["NextDayOpen%_num"] > 0) & (df["NextDayLow%_num"] < -1),
+            -1.0,
+            np.where(
+                (df["NextDayOpen%_num"] > 0),
+                df["NextDay%_num"],
+                0.0
+            )
+        ).sum()
+    )
+
+    loss = float(
+        df.loc[df["NextDayOpen%_num"] < 0, "NextDayOpen%_num"].sum(skipna=True)
+    )
+
+    net = gain - abs(loss)
+
+    return {"gain": gain, "loss": loss, "net": net}
 
 
 # =============================
@@ -289,7 +319,7 @@ def print_history_output(
 ) -> None:
 
     feats = feats_in.copy()
-        # ✅ If user typed a date AND that bar's SignalDay% (DayRetPct) > 12%, do NOT print history
+    # ✅ If user typed a date AND that bar's SignalDay% (DayRetPct) > 12%, do NOT print history
     if single_date_input:
         bar_dates = feats.index[feats.index <= end_date]
         if len(bar_dates) > 0:
@@ -297,7 +327,6 @@ def print_history_output(
             dayret = feats.loc[bar_date].get("DayRetPct", np.nan)
             if np.isfinite(dayret) and dayret > big_day_thresh:
                 return
-
 
     feats["NextDay%"] = (feats["Close"].shift(-1) / feats["Close"] - 1) * 100
     feats["NextDayOpen%"] = (feats["Open"].shift(-1) / feats["Close"] - 1) * 100
@@ -358,7 +387,6 @@ def print_history_output(
         if bar_is_signal and prev_is_signal and bar_str == latest_signal_str:
             return
 
-
     # ===== Compute NET first (before printing anything) =====
     _tmp = out.copy()
     _tmp["NextDay%_num"] = _tmp["NextDay%"].apply(_pct_str_to_float)
@@ -390,6 +418,40 @@ def print_history_output(
     if net <= 2:
         return
 
+    # ✅ NEW: Bucket summary (Total / Current / 60s / 70s / 80s / 90s) using SAME Net logic
+    current_signal_str = None
+    if len(bar_dates) > 0:
+        current_signal_str = pd.to_datetime(bar_dates[-1]).strftime("%Y-%m-%d")
+
+    buckets = {
+        "Total": _tmp,
+        "Current": _tmp[_tmp["Signal Date"] == current_signal_str] if current_signal_str else _tmp.iloc[0:0],
+        "60s": _tmp[(_tmp["Score"] >= 60) & (_tmp["Score"] < 70)],
+        "70s": _tmp[(_tmp["Score"] >= 70) & (_tmp["Score"] < 80)],
+        "80s": _tmp[(_tmp["Score"] >= 80) & (_tmp["Score"] < 90)],
+        "90s": _tmp[_tmp["Score"] >= 90],
+    }
+
+    stats = {k: _net_stats(v) for k, v in buckets.items()}
+    counts = {k: len(v) for k, v in buckets.items()}
+
+    summary_df = pd.DataFrame(
+        {
+            f"Total({counts['Total']})":     [stats["Total"]["gain"],   stats["Total"]["loss"],   stats["Total"]["net"]],
+            f"Current({counts['Current']})": [stats["Current"]["gain"], stats["Current"]["loss"], stats["Current"]["net"]],
+            f"60s({counts['60s']})":         [stats["60s"]["gain"],     stats["60s"]["loss"],     stats["60s"]["net"]],
+            f"70s({counts['70s']})":         [stats["70s"]["gain"],     stats["70s"]["loss"],     stats["70s"]["net"]],
+            f"80s({counts['80s']})":         [stats["80s"]["gain"],     stats["80s"]["loss"],     stats["80s"]["net"]],
+            f"90s({counts['90s']})":         [stats["90s"]["gain"],     stats["90s"]["loss"],     stats["90s"]["net"]],
+        },
+        index=[
+            "Sum NextDay% (Open > 0, cap -1%)",
+            "Sum Open% (Open < 0)",
+            "Net (Gain - Loss)",
+        ],
+    )
+
+    summary_df = summary_df.applymap(lambda x: f"{x:.2f}%")
 
     risk_open_val = float(_tmp["NextDayOpen%_num"].min(skipna=True)) if not _tmp.empty else float("nan")
     risk_open = f"{risk_open_val:.2f}%" if np.isfinite(risk_open_val) else "NONE"
@@ -415,11 +477,14 @@ def print_history_output(
 
     print("\n" + "=" * 61)
     print("SUMMARY".center(61))
-    print("=" * 61 + "\n")
 
-    print(f"  Sum of NextDay% (Open > 0, cap -1%)        : {sum_nextday_when_open_gt0:.2f}%")
-    print(f"  Sum of NextDayOpen% (Open < 0)             : {sum_open_when_open_lt0:.2f}%")
-    print(f"  Net (Gain - Loss)                          : {net:.2f}%")
+
+       
+
+    # ✅ New: bucket table
+    print("\n" + "-" * 90)
+    print(summary_df.to_string())
+    print("-" * 90)
 
     print("\n" + "-" * 67 + "\n")
 
@@ -428,7 +493,6 @@ def print_history_output(
     print(f"  QQQ NextDayOpen% on that DATE              : {qqq_day_str}")
 
     print("\n" + "=" * 67)
-
 
 
 # =============================
@@ -520,12 +584,10 @@ def main() -> None:
     print("  Sum of NextDay% (Open > 0, cap -1%) means")
     print("  Open>0 and Low <-1  then -1")
     print("  Open>0 and Low >-1 then nextday ")
-    
- 
+
     print("  Sum of NextDayOpen% (Open < 0)  means")
     print("                        if Open<0 sum(Open)")
     print("3) Input Date or Default input date is latest signal date; latest signal date of previous working day also signal day (Consecutive or repeated days  doesn\'t work. repeated not handledd only preivious day handled)")
-    
 
     # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
     for t in scan_df["Ticker"].tolist():
