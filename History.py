@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-import sys
 import time
+from typing import List, Dict
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -10,29 +11,26 @@ from pandas.tseries.offsets import BDay
 
 
 # =============================
-# PATHS
+# PRINT SETTINGS (prevents "..." hiding BaseScore/Bonus)
 # =============================
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "scanner_output")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", 260)
+pd.set_option("display.max_colwidth", 120)
+# ✅ CENTER COLUMN HEADERS
+pd.set_option("display.colheader_justify", "center")
 
 
 # =============================
-# HELPERS
+# BASIC HELPERS
 # =============================
-def get_ticker_from_argv() -> str:
-    # If user passed ticker in command line, use it
-    if len(sys.argv) >= 2:
-        t = sys.argv[1].upper().strip().replace(".", "-")
-        if not t:
-            raise SystemExit("❌ Empty ticker argument.")
-        return t
-
-    # Otherwise prompt user to type it
-    ticker = input("📈 Please enter stock ticker (e.g. AAPL, TSLA): ").upper().strip().replace(".", "-")
-    if not ticker:
-        raise SystemExit("❌ No ticker entered.")
-    return ticker
+def parse_tickers(s: str) -> List[str]:
+    tickers = [t.strip().upper().replace(".", "-") for t in s.split(",")]
+    out, seen = [], set()
+    for t in tickers:
+        if t and t not in seen:
+            out.append(t)
+            seen.add(t)
+    return out
 
 
 def roll_end_date(s: str | None) -> pd.Timestamp:
@@ -42,6 +40,11 @@ def roll_end_date(s: str | None) -> pd.Timestamp:
     return d
 
 
+# ✅ include the next trading day so shift(-1) has data for "yesterday"
+def end_date_plus_one_trading_day(end_date: pd.Timestamp) -> pd.Timestamp:
+    return (end_date + BDay(1)).normalize()
+
+
 def safe(x) -> float:
     try:
         return float(x)
@@ -49,37 +52,65 @@ def safe(x) -> float:
         return float("nan")
 
 
-def _extract_ohlcv(hist: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    """
-    yfinance can return:
-      - single-level columns: Open High Low Close Volume
-      - multiindex columns: (TICKER, Open) ... when group_by="ticker"
-    This returns a clean OHLCV df.
-    """
+def chunks(lst: List[str], n: int):
+    for i in range(0, len(lst), n):
+        yield lst[i: i + n]
+
+
+def _extract_ohlcv(hist: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
     cols = ["Open", "High", "Low", "Close", "Volume"]
-
     if hist is None or hist.empty:
-        raise SystemExit(f"❌ No data returned for {ticker}")
+        return None
 
-    # MultiIndex: (ticker, field)
     if isinstance(hist.columns, pd.MultiIndex):
-        top = set(hist.columns.get_level_values(0))
-        if ticker not in top:
-            matches = [t for t in top if str(t).upper() == ticker.upper()]
-            if not matches:
-                raise SystemExit(f"❌ {ticker} not found in MultiIndex columns: {sorted(top)}")
-            ticker = matches[0]
-
+        if ticker not in hist.columns.get_level_values(0):
+            return None
         df = hist[ticker]
-        if not set(cols).issubset(df.columns):
-            raise SystemExit(f"❌ {ticker} missing OHLCV. Got: {list(df.columns)}")
-        return df[cols].dropna()
+    else:
+        df = hist
 
-    # Single-level
-    if set(cols).issubset(hist.columns):
-        return hist[cols].dropna()
+    if not set(cols).issubset(df.columns):
+        return None
+    return df[cols].dropna()
 
-    raise SystemExit(f"❌ {ticker} missing OHLCV columns. Got: {list(hist.columns)}")
+
+def _pct_str_to_float(v):
+    if isinstance(v, str):
+        v = v.strip().replace("%", "")
+        return float(v) if v else np.nan
+    try:
+        return float(v)
+    except Exception:
+        return np.nan
+
+
+# =============================
+# ✅ NEW: SAME NET CALC, BUT FOR ANY SUBSET (NO LOGIC CHANGE)
+# =============================
+def _net_stats(df: pd.DataFrame) -> dict:
+    """Returns Gain/Loss/Net using EXACT same rules as your current Net calc."""
+    if df is None or df.empty:
+        return {"gain": 0.0, "loss": 0.0, "net": 0.0}
+
+    gain = float(
+        np.where(
+            (df["NextDayOpen%_num"] > 0) & (df["NextDayLow%_num"] < -1),
+            -1.0,
+            np.where(
+                (df["NextDayOpen%_num"] > 0),
+                df["NextDay%_num"],
+                0.0
+            )
+        ).sum()
+    )
+
+    loss = float(
+        df.loc[df["NextDayOpen%_num"] < 0, "NextDayOpen%_num"].sum(skipna=True)
+    )
+
+    net = gain - abs(loss)
+
+    return {"gain": gain, "loss": loss, "net": net}
 
 
 # =============================
@@ -94,8 +125,8 @@ def download_history(ticker: str, end_date: pd.Timestamp) -> pd.DataFrame:
                 period="1y",
                 interval="1d",
                 progress=False,
-                auto_adjust=False,   # IMPORTANT
-                group_by="ticker",   # allows MultiIndex; we handle both
+                auto_adjust=False,  # IMPORTANT
+                group_by="ticker",
                 threads=True,
             )
             break
@@ -103,8 +134,15 @@ def download_history(ticker: str, end_date: pd.Timestamp) -> pd.DataFrame:
             time.sleep(0.6 * (2 ** attempt))
 
     df = _extract_ohlcv(hist, ticker)
+    if df is None or df.empty:
+        raise SystemExit(f"❌ No data returned for {ticker}")
+
     df.index = pd.to_datetime(df.index)
-    df = df.loc[df.index <= end_date]
+
+    # keep one extra trading day beyond end_date
+    end_plus = end_date_plus_one_trading_day(end_date)
+    df = df.loc[df.index <= end_plus]
+
     if df.empty:
         raise SystemExit(f"❌ {ticker} has no rows after end_date filter.")
     return df
@@ -119,7 +157,7 @@ def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
                 period="1y",
                 interval="1d",
                 progress=False,
-                auto_adjust=False,   # IMPORTANT
+                auto_adjust=False,
                 group_by="ticker",
                 threads=True,
             )
@@ -128,12 +166,49 @@ def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
             time.sleep(0.6 * (2 ** attempt))
 
     df = _extract_ohlcv(hist, "SPY")
+    if df is None or df.empty:
+        raise SystemExit("❌ Failed to download SPY data.")
+
     close = df["Close"].copy()
     close.index = pd.to_datetime(close.index)
-    close = close.loc[close.index <= end_date].dropna()
+
+    # keep one extra trading day beyond end_date
+    end_plus = end_date_plus_one_trading_day(end_date)
+    close = close.loc[close.index <= end_plus].dropna()
+
     if close.empty:
         raise SystemExit("❌ SPY close empty after end_date filter.")
     return close
+
+
+def download_many(tickers: List[str], end_date: pd.Timestamp) -> Dict[str, pd.DataFrame]:
+    out: Dict[str, pd.DataFrame] = {}
+
+    # keep one extra trading day beyond end_date
+    end_plus = end_date_plus_one_trading_day(end_date)
+
+    for batch in chunks(tickers, 60):
+        hist = yf.download(
+            " ".join(batch),
+            period="1y",
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+            group_by="ticker",
+            threads=True,
+        )
+        for t in batch:
+            df = _extract_ohlcv(hist, t)
+            if df is None or df.empty:
+                continue
+            df.index = pd.to_datetime(df.index)
+
+            df = df.loc[df.index <= end_plus]
+
+            if not df.empty:
+                out[t] = df
+        time.sleep(0.15)
+    return out
 
 
 # =============================
@@ -168,7 +243,6 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_relative_strength(d: pd.DataFrame, spy_close: pd.Series) -> pd.DataFrame:
     out = d.copy()
-
     aligned_spy = spy_close.reindex(out.index).ffill()
     rs = (out["Close"] / aligned_spy).replace([np.inf, -np.inf], np.nan)
 
@@ -208,9 +282,7 @@ def footprint_score(row: pd.Series) -> float:
 
 
 def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
-    if i < 60:
-        return 0.0
-
+    """Match ByDate.py bonus logic exactly (no extra bonus rules, no i<60 cutoff)."""
     r = d.iloc[i]
     bonus = 0.0
 
@@ -227,55 +299,32 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
 
     if np.isfinite(rs) and np.isfinite(rs_sma20) and rs > rs_sma20:
         bonus += 6
+
     if np.isfinite(rs) and np.isfinite(rs20h) and rs >= rs20h * 0.999:
         bonus += 6
-
-    recent = d.iloc[max(0, i - 12): i]
-    if len(recent) > 0:
-        cond = (
-            (recent["DayRetPct"] > 0) &
-            (recent["VolRel"] >= 1.25) &
-            (recent["ClosePos"] >= 0.60)
-        )
-        acc_days = int(cond.sum())
-        if acc_days >= 2:
-            bonus += 8
-        if acc_days >= 3:
-            bonus += 6
-
-    r10 = r.get("RangePct10", np.nan)
-    r20 = r.get("RangePct20", np.nan)
-    if np.isfinite(r10) and np.isfinite(r20) and r10 < r20:
-        bonus += 5
 
     return float(min(35.0, bonus))
 
 
 # =============================
-# MAIN
+# HISTORY OUTPUT (per ticker): PRINT NOTHING unless Net (Gain - Loss) > 2
 # =============================
-def main() -> None:
-    ticker = get_ticker_from_argv()
-    end_date = roll_end_date(None)
+def print_history_output(
+    ticker: str,
+    feats_in: pd.DataFrame,
+    qqq_nextday_open_pct: pd.Series,
+    end_date: pd.Timestamp,
+    single_date_input: bool,
+    big_day_thresh: float = 12.0,
+) -> None:
 
-    spy_close = download_spy_close(end_date)
+    feats = feats_in.copy()
 
-    df = download_history(ticker, end_date)
-
-    # (ADDED ONLY FOR YOUR REQUEST): QQQ next-day open % series, so we can print QQQ value on the risk date
-    qqq_df = download_history("QQQ", end_date)
-    qqq_nextday_open_pct = (qqq_df["Open"].shift(-1) / qqq_df["Close"] - 1) * 100
-
-    feats = add_features(df)
-    feats = add_relative_strength(feats, spy_close)
-
-    # Next day % change (Close[t+1] vs Close[t])
     feats["NextDay%"] = (feats["Close"].shift(-1) / feats["Close"] - 1) * 100
     feats["NextDayOpen%"] = (feats["Open"].shift(-1) / feats["Close"] - 1) * 100
     feats["NextDayHigh%"] = (feats["High"].shift(-1) / feats["Close"] - 1) * 100
     feats["NextDayLow%"] = (feats["Low"].shift(-1) / feats["Close"] - 1) * 100
 
-    # Compute score for EVERY day
     rows: list[dict] = []
     for i in range(len(feats)):
         base = footprint_score(feats.iloc[i])
@@ -284,99 +333,124 @@ def main() -> None:
 
         rows.append({
             "Ticker": ticker,
-            "Date": feats.index[i].strftime("%Y-%m-%d"),
+            "Signal Date": feats.index[i].strftime("%Y-%m-%d"),
+            "SignalDay%": (f"{feats.iloc[i].get('DayRetPct', np.nan):.2f}%"
+                           if np.isfinite(feats.iloc[i].get("DayRetPct", np.nan)) else ""),
             "Score": score,
-
-            "NextDay%": (
-                f"{feats.iloc[i].get('NextDay%', np.nan):.2f}%"
-                if np.isfinite(feats.iloc[i].get("NextDay%", np.nan))
-                else ""
-            ),
-
-            "NextDayOpen%": (
-                f"{feats.iloc[i].get('NextDayOpen%', np.nan):.2f}%"
-                if np.isfinite(feats.iloc[i].get("NextDayOpen%", np.nan))
-                else ""
-            ),
-            "NextDayHigh%": (
-                f"{feats.iloc[i].get('NextDayHigh%', np.nan):.2f}%"
-                if np.isfinite(feats.iloc[i].get("NextDayHigh%", np.nan))
-                else ""
-            ),
-            "NextDayLow%": (
-                f"{feats.iloc[i].get('NextDayLow%', np.nan):.2f}%"
-                if np.isfinite(feats.iloc[i].get("NextDayLow%", np.nan))
-                else ""
-            ),
-
+            "NextDay%": (f"{feats.iloc[i].get('NextDay%', np.nan):.2f}%"
+                         if np.isfinite(feats.iloc[i].get("NextDay%", np.nan)) else ""),
+            "NextDayOpen%": (f"{feats.iloc[i].get('NextDayOpen%', np.nan):.2f}%"
+                             if np.isfinite(feats.iloc[i].get("NextDayOpen%", np.nan)) else ""),
+            "NextDayHigh%": (f"{feats.iloc[i].get('NextDayHigh%', np.nan):.2f}%"
+                             if np.isfinite(feats.iloc[i].get("NextDayHigh%", np.nan)) else ""),
+            "NextDayLow%": (f"{feats.iloc[i].get('NextDayLow%', np.nan):.2f}%"
+                            if np.isfinite(feats.iloc[i].get("NextDayLow%", np.nan)) else ""),
             "BaseScore": base,
             "Bonus": bonus,
-            "Close": safe(feats.iloc[i].get("Close", np.nan)),
-            "Volume": safe(feats.iloc[i].get("Volume", np.nan)),
-            "DollarVol": safe(feats.iloc[i].get("DollarVol", np.nan)),
-            "RS": safe(feats.iloc[i].get("RS", np.nan)),
         })
 
     out = pd.DataFrame(rows)
-
-    # Keep ONLY last 90 trading days
     out = out.tail(90).reset_index(drop=True)
-
-    # Only score > 60
-    out = out[out["Score"] > 60].reset_index(drop=True)
+    out = out[out["Score"] >= 60].reset_index(drop=True)
     out.insert(0, "Row", out.index + 1)
 
-    # Remove unwanted columns from table/csv
-    out = out.drop(columns=["Close", "Volume", "DollarVol", "RS"])
+    # If no rows, print nothing
+    if out.empty:
+        return
+    # ==========================================================
+    # EXCLUDE RULE (applies to BOTH default date and typed date):
+    # If bar_date is the latest signal date AND the prior trading
+    # day is also a signal date, then DO NOT print this table.
+    # ==========================================================
+    bar_dates = feats.index[feats.index <= end_date]
+    if len(bar_dates) >= 2:
+        bar_date = bar_dates[-1]
+        prev_date = bar_dates[-2]
 
-    print("\nLAST 90 DAYS (ONLY SCORE > 60)")
-    print("-" * 110)
-    print(out.to_string(index=False))
+        bar_str = pd.to_datetime(bar_date).strftime("%Y-%m-%d")
+        prev_str = pd.to_datetime(prev_date).strftime("%Y-%m-%d")
 
-    # =============================
-    # SUMMARY TABLE (ADDED)
-    # =============================
-    def _pct_str_to_float(v):
-        if isinstance(v, str):
-            v = v.strip().replace("%", "")
-            return float(v) if v else np.nan
-        try:
-            return float(v)
-        except Exception:
-            return np.nan
+        latest_signal_str = str(out["Signal Date"].max())
 
+        bar_is_signal = (out["Signal Date"] == bar_str).any()
+        prev_is_signal = (out["Signal Date"] == prev_str).any()
+
+        # If the latest signal is the bar date AND prior day also signal -> suppress all history output
+        if bar_is_signal and prev_is_signal and bar_str == latest_signal_str:
+            return
+
+    # ===== Compute NET first (before printing anything) =====
     _tmp = out.copy()
     _tmp["NextDay%_num"] = _tmp["NextDay%"].apply(_pct_str_to_float)
     _tmp["NextDayOpen%_num"] = _tmp["NextDayOpen%"].apply(_pct_str_to_float)
     _tmp["NextDayLow%_num"] = _tmp["NextDayLow%"].apply(_pct_str_to_float)
 
     sum_nextday_when_open_gt0 = float(
-        _tmp.loc[_tmp["NextDayOpen%_num"] > 0, "NextDay%_num"].clip(lower=-1).sum(skipna=True)
-    )
-    sum_open_when_open_lt0 = float(
-        _tmp.loc[_tmp["NextDayOpen%_num"] < 0, "NextDayOpen%_num"].sum(skipna=True)
-    )
+        np.where(
+            (_tmp["NextDayOpen%_num"] > 0) & (_tmp["NextDayLow%_num"] < -1),
+            -1.0,
+            np.where(
+                (_tmp["NextDayOpen%_num"] > 0),
+                _tmp["NextDay%_num"],
+                0.0
+            )
+        ).sum()
+    ) if not _tmp.empty else 0.0
 
-    # FIX (ONLY CHANGE): treat the negative sum as a magnitude (so 8.78 - 1.80)
+    sum_open_when_open_lt0 = float(
+        _tmp.loc[
+            _tmp["NextDayOpen%_num"] < 0,
+            "NextDayOpen%_num"
+        ].sum(skipna=True)
+    ) if not _tmp.empty else 0.0
+
     net = sum_nextday_when_open_gt0 - abs(sum_open_when_open_lt0)
 
-    # RISK: minimum NextDayLow% when NextDayOpen% > 0; must be negative else NONE
-    risk_val = float(
-        _tmp.loc[_tmp["NextDayOpen%_num"] > 0, "NextDayLow%_num"].min(skipna=True)
-    ) if (_tmp["NextDayOpen%_num"] > 0).any() else float("nan")
-    risk = f"{risk_val:.2f}%" if np.isfinite(risk_val) and risk_val < 0 else "NONE"
+    # Gate: PRINT NOTHING unless Net > 2
+    if net <= 2:
+        return
 
-    # =============================
-    # ADDITIONAL RISK (At Open): Min(NextDayOpen%) + SHOW DATE + SHOW QQQ THAT DAY
-    # =============================
-    risk_open_val = float(_tmp["NextDayOpen%_num"].min(skipna=True))
+    # ✅ NEW: Bucket summary (Total / Current / 60s / 70s / 80s / 90s) using SAME Net logic
+    current_signal_str = None
+    if len(bar_dates) > 0:
+        current_signal_str = pd.to_datetime(bar_dates[-1]).strftime("%Y-%m-%d")
+
+    buckets = {
+        "Total": _tmp,
+        "Current": _tmp[_tmp["Signal Date"] == current_signal_str] if current_signal_str else _tmp.iloc[0:0],
+        "60s": _tmp[(_tmp["Score"] >= 60) & (_tmp["Score"] < 70)],
+        "70s": _tmp[(_tmp["Score"] >= 70) & (_tmp["Score"] < 80)],
+        "80s": _tmp[(_tmp["Score"] >= 80) & (_tmp["Score"] < 90)],
+        "90s": _tmp[_tmp["Score"] >= 90],
+    }
+
+    stats = {k: _net_stats(v) for k, v in buckets.items()}
+    counts = {k: len(v) for k, v in buckets.items()}
+
+    summary_df = pd.DataFrame(
+        {
+            f"Total({counts['Total']})":     [stats["Total"]["gain"],   stats["Total"]["loss"],   stats["Total"]["net"]],
+            f"Current({counts['Current']})": [stats["Current"]["gain"], stats["Current"]["loss"], stats["Current"]["net"]],
+            f"60s({counts['60s']})":         [stats["60s"]["gain"],     stats["60s"]["loss"],     stats["60s"]["net"]],
+            f"70s({counts['70s']})":         [stats["70s"]["gain"],     stats["70s"]["loss"],     stats["70s"]["net"]],
+            f"80s({counts['80s']})":         [stats["80s"]["gain"],     stats["80s"]["loss"],     stats["80s"]["net"]],
+            f"90s({counts['90s']})":         [stats["90s"]["gain"],     stats["90s"]["loss"],     stats["90s"]["net"]],
+        },
+        index=[
+            "Sum NextDay% (Open > 0, cap -1%)",
+            "Sum Open% (Open < 0)",
+            "Net (Gain - Loss)",
+        ],
+    )
+
+    summary_df = summary_df.applymap(lambda x: f"{x:.2f}%")
+
+    risk_open_val = float(_tmp["NextDayOpen%_num"].min(skipna=True)) if not _tmp.empty else float("nan")
     risk_open = f"{risk_open_val:.2f}%" if np.isfinite(risk_open_val) else "NONE"
 
     if np.isfinite(risk_open_val) and not _tmp.empty:
-        # date in YOUR filtered signal table (out/_tmp) where NextDayOpen% is minimum
         _idx = _tmp["NextDayOpen%_num"].idxmin()
-        risk_open_date = str(_tmp.loc[_idx, "Date"])
-        # QQQ NextDayOpen% on that same date (ffill if missing)
+        risk_open_date = str(_tmp.loc[_idx, "Signal Date"])
         qqq_day_val = float(
             qqq_nextday_open_pct.reindex([pd.to_datetime(risk_open_date)], method="ffill").iloc[0]
         )
@@ -385,44 +459,151 @@ def main() -> None:
         risk_open_date = "NONE"
         qqq_day_str = "NONE"
 
-    summary = pd.DataFrame([
-        {"Metric": "Sum of NextDay% when NextDayOpen% (if NextDay%<-1 take -1)", "Value": sum_nextday_when_open_gt0},
-        {"Metric": "Sum of NextDayOpen% when NextDayOpen% < 0", "Value": sum_open_when_open_lt0},
-        {"Metric": "Sum(NextDay%|Open>0) - Sum(Open%|Open<0)", "Value": net},
-        {"Metric": "RISK (Min NextDayLow% when NextDayOpen% > 0)", "Value": risk},
-        {"Metric": "RISK (At Open)", "Value": risk_open},
-        # (ADDED): show the date that produced RISK (At Open), and QQQ NextDayOpen% on that date
-        {"Metric": "RISK (At Open) DATE", "Value": risk_open_date},
-        {"Metric": "QQQ NextDayOpen% ON THAT DATE", "Value": qqq_day_str},
-    ])
+    print("\n" + "=" * 90)
+    print(f"HISTORY OUTPUT FOR: {ticker}")
+    print("=" * 90)
 
-    def _fmt_value(x):
-        if isinstance(x, str):
-            return x
-        return f"{float(x):.2f}%"
+    print("\nLAST 90 DAYS (ONLY SCORE >= 60)")
+    print("-" * 110)
+    print(out.to_string(index=False))
 
-    summary["Value"] = summary["Value"].map(_fmt_value)
-
-    # =============================
-    # PRINT FORMAT
-    # =============================
     print("\n" + "=" * 61)
     print("SUMMARY".center(61))
-    print("=" * 61 + "\n")
+    # --- Current Score = latest signal day score ---
+    bar_dates = feats.index[feats.index <= end_date]
+    if len(bar_dates) > 0:
+        bar_date = bar_dates[-1]
+        i = int(feats.index.get_loc(bar_date))
+        current_score = float(min(
+            100.0,
+            footprint_score(feats.iloc[i]) + confirmation_bonus(feats, i)
+        ))
+        print(f"Current Score: {current_score:.1f}")
 
-    print(f"  Sum of NextDay% (Open > 0, cap -1%)        : {summary.iloc[0]['Value']:>7}")
-    print(f"  Sum of NextDayOpen% (Open < 0)             : {summary.iloc[1]['Value']:>7}")
-    print(f"  Net (Gain - Loss)                          : {summary.iloc[2]['Value']:>7}")
+
+       
+
+    # ✅ New: bucket table
+    print("\n" + "-" * 90)
+    print(summary_df.to_string())
+    print("-" * 90)
 
     print("\n" + "-" * 67 + "\n")
 
-    print(f"  RISK (Worst NextDayLow% | Open > 0)        : {summary.iloc[3]['Value']:>7}")
-    print(f"  RISK (At Open)                             : {summary.iloc[4]['Value']:>7}")
-    # (ADDED): one more row after, as you requested
-    print(f"  DATE of RISK (At Open)                     : {summary.iloc[5]['Value']:>7}")
-    print(f"  QQQ NextDayOpen% on that DATE              : {summary.iloc[6]['Value']:>7}")
+    print(f"  RISK (At Open)                             : {risk_open}")
+    print(f"  DATE of RISK (At Open)                     : {risk_open_date}")
+    print(f"  QQQ NextDayOpen% on that DATE              : {qqq_day_str}")
 
     print("\n" + "=" * 67)
+
+
+# =============================
+# MAIN: Scan table + History output ONLY for scan table tickers
+# =============================
+def main() -> None:
+    tickers_raw = input("Please enter stock ticker (e.g. AAPL, TSLA): ").strip()
+
+    date_raw = input("Enter Date YYYY-MM-DD (default ): ").strip()
+    single_date_input = bool(date_raw)
+
+    os.system("cls" if os.name == "nt" else "clear")
+
+    tickers = parse_tickers(tickers_raw)
+    if not tickers:
+        raise SystemExit("❌ No tickers entered.")
+
+    end_date = roll_end_date(date_raw if date_raw else None)
+
+    MIN_SCORE = 60  # scan table filter so only matches get history
+    MIN_DOLLARVOL = 50_000_000  # match ByDate.py liquidity filter
+
+    spy_close = download_spy_close(end_date)
+
+    # for QQQ line in history summary
+    qqq_df = download_history("QQQ", end_date)
+    qqq_nextday_open_pct = (qqq_df["Open"].shift(-1) / qqq_df["Close"] - 1) * 100
+
+    hist_map = download_many(tickers, end_date)
+
+    scan_rows: list[dict] = []
+    feats_map: Dict[str, pd.DataFrame] = {}
+
+    for t in tickers:
+        df = hist_map.get(t)
+        if df is None or len(df) < 80:
+            continue
+
+        feats = add_features(df)
+        feats = add_relative_strength(feats, spy_close)
+        feats_map[t] = feats
+
+        # pick bar = exact date if trading day else previous trading day
+        bar_date = feats.index[feats.index <= end_date]
+        if len(bar_date) == 0:
+            continue
+        bar_date = bar_date[-1]
+
+        i = int(feats.index.get_loc(bar_date))
+        base = footprint_score(feats.iloc[i])
+        bonus = confirmation_bonus(feats, i)
+        score = float(min(100.0, base + bonus))
+
+        
+
+        dollar_vol = safe(feats.iloc[i].get("DollarVol", np.nan))
+        if np.isfinite(dollar_vol) and dollar_vol < MIN_DOLLARVOL:
+            continue
+
+        scan_rows.append({
+            "Ticker": t,
+            "BarDate": bar_date.strftime("%Y-%m-%d"),
+            "Score": score,
+            "BaseScore": base,
+            "Bonus": bonus,
+            "Close": safe(feats.iloc[i].get("Close", np.nan)),
+            "DayRetPct": safe(feats.iloc[i].get("DayRetPct", np.nan)),
+            "VolRel": safe(feats.iloc[i].get("VolRel", np.nan)),
+            "DollarVol": dollar_vol,
+            "RS": safe(feats.iloc[i].get("RS", np.nan)),
+            "Reasons": "(see History output for full breakdown)",
+        })
+
+    if not scan_rows:
+        print("No matches found.")
+        return
+
+    scan_df = (
+        pd.DataFrame(scan_rows)
+        .sort_values(["Score", "VolRel", "DollarVol"], ascending=False)
+        .reset_index(drop=True)
+    )
+
+    # ✅ DO NOT CHANGE THIS TABLE (your request)
+    print(scan_df)
+    print("\nHistory Table Exclude Rules")
+    print("1) Net (Gain - Loss) < 2%")
+    print("2) If single date input AND SignalDay% > 12%")
+    print("  Sum of NextDay% (Open > 0, cap -1%) means")
+    print("  Open>0 and Low <-1  then -1")
+    print("  Open>0 and Low >-1 then nextday ")
+
+    print("  Sum of NextDayOpen% (Open < 0)  means")
+    print("                        if Open<0 sum(Open)")
+    print("3) Input Date or Default input date is latest signal date; latest signal date of previous working  also signal day (Consecutive or repeated days  doesn\'t work. repeated not handledd only preivious day handled)")
+    print("4) Score Rules")
+    print("    60+ ignore or watchlist, 70+ is good, 80+ is great, 90+ is rare and dangerous.") 
+    
+    print("5)SignalDay good Score But not price much like 1% if next day below rules , buying point")
+    print("   Price stays above signal-day low")
+    print("   Volume is lower than signal day")
+    print("   Candle closes above its midpoint")
+
+    # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
+    for t in scan_df["Ticker"].tolist():
+        feats = feats_map.get(t)
+        if feats is None or feats.empty:
+            continue
+        print_history_output(t, feats, qqq_nextday_open_pct, end_date, single_date_input)
 
 
 if __name__ == "__main__":
