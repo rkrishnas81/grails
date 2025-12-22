@@ -574,6 +574,9 @@ def main() -> None:
         .reset_index(drop=True)
     )
 
+    # ✅ DO NOT CHANGE THIS TABLE (your request)
+    print(scan_df)
+
 
     # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
     for t in scan_df["Ticker"].tolist():
