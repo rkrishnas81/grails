@@ -315,8 +315,10 @@ def print_history_output(
     qqq_nextday_open_pct: pd.Series,
     end_date: pd.Timestamp,
     single_date_input: bool,
+    min_score: float,
     big_day_thresh: float = 0.0,
 ) -> None:
+
 
     feats = feats_in.copy()
 
@@ -351,7 +353,7 @@ def print_history_output(
 
     out = pd.DataFrame(rows)
     out = out.tail(90).reset_index(drop=True)
-    out = out[out["Score"] >= 60].reset_index(drop=True)
+    out = out[out["Score"] >= min_score].reset_index(drop=True)
     out.insert(0, "Row", out.index + 1)
 
     # If no rows, print nothing
@@ -382,6 +384,27 @@ def print_history_output(
     _tmp["NextDay%_num"] = _tmp["NextDay%"].apply(_pct_str_to_float)
     _tmp["NextDayOpen%_num"] = _tmp["NextDayOpen%"].apply(_pct_str_to_float)
     _tmp["NextDayLow%_num"] = _tmp["NextDayLow%"].apply(_pct_str_to_float)
+    
+    # ================================
+    # NEW: Min NextDayLow% when Open>0 and NextDay%>1
+    # ================================
+    cond = (
+        (_tmp["NextDayOpen%_num"] > 0) &
+        (_tmp["NextDay%_num"] > 1)
+    )
+
+    min_low_strong_up = (
+        float(_tmp.loc[cond, "NextDayLow%_num"].min())
+        if cond.any()
+        else float("nan")
+    )
+
+    min_low_strong_up_str = (
+        f"{min_low_strong_up:.2f}%"
+        if np.isfinite(min_low_strong_up)
+        else "NONE"
+    )
+
 
     sum_nextday_when_open_gt0 = float(
         np.where(
@@ -489,6 +512,7 @@ def print_history_output(
     print(f"  RISK (At Open)                             : {risk_open}")
     print(f"  DATE of RISK (At Open)                     : {risk_open_date}")
     print(f"  QQQ NextDayOpen% on that DATE              : {qqq_day_str}")
+    print(f"  MIN NextDayLow% | Open>0 & NextDay%>1      : {min_low_strong_up_str}")
 
     print("\n" + "=" * 67)
 
@@ -501,6 +525,9 @@ def main() -> None:
 
     date_raw = input("Enter Date YYYY-MM-DD (default ): ").strip()
     single_date_input = bool(date_raw)
+    score_raw = input("Enter minimum score (default 60): ").strip()
+    MIN_SCORE = float(score_raw) if score_raw else 60.0
+
 
     os.system("cls" if os.name == "nt" else "clear")
 
@@ -510,7 +537,7 @@ def main() -> None:
 
     end_date = roll_end_date(date_raw if date_raw else None)
 
-    MIN_SCORE = 60  # scan table filter so only matches get history
+    
     MIN_DOLLARVOL = 50_000_000  # match ByDate.py liquidity filter
 
     spy_close = download_spy_close(end_date)
@@ -576,14 +603,12 @@ def main() -> None:
 
     # ✅ DO NOT CHANGE THIS TABLE (your request)
     print(scan_df)
-
-
     # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
     for t in scan_df["Ticker"].tolist():
         feats = feats_map.get(t)
         if feats is None or feats.empty:
             continue
-        print_history_output(t, feats, qqq_nextday_open_pct, end_date, single_date_input)
+        print_history_output(t, feats, qqq_nextday_open_pct, end_date, single_date_input, MIN_SCORE)
 
 
 if __name__ == "__main__":
