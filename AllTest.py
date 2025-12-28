@@ -770,6 +770,12 @@ def main() -> None:
         dayret = safe(feats.iloc[i].get("DayRetPct", np.nan))
         rscore = float(regime["score"]) if USE_REGIME_CONFIRM else 75.0
         iscore = float(intr["score"]) if USE_INTRADAY_60M_CONFIRM else 75.0
+        meets_criteria = (
+            (score >= 72.0) and (score <= 82.0) and
+            (iscore >= 75.0) and
+            (rscore >= 70.0) and
+            np.isfinite(dayret) and (dayret >= 1.0) and (dayret <= 5.0)
+        )
 
         verdict = "WATCH"
         if (
@@ -792,9 +798,11 @@ def main() -> None:
             "DayRetPct": round(dayret, 2) if np.isfinite(dayret) else np.nan,
             "RegimeScore": round(rscore, 1),
             "IntradayScore": round(iscore, 1),
+            "MeetsCriteria": "Yes" if meets_criteria else "No",
             "Verdict": verdict,
             "Plan": "BUY signal close / sell next day"
         })
+
 
     if not scan_rows:
         print("No matches found.")

@@ -818,6 +818,8 @@ def main() -> None:
     # DO NOT CHANGE THIS TABLE
     print(scan_df)
 
+
+
     for t in scan_df["Ticker"].tolist():
         feats = feats_map.get(t)
         if feats is None or feats.empty:
