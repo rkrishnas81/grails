@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -16,10 +16,11 @@ from pandas.tseries.offsets import BDay
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 260)
 pd.set_option("display.max_colwidth", 120)
-# ✅ CENTER COLUMN HEADERS
 pd.set_option("display.colheader_justify", "center")
+
+
 # =============================
-# CONFIRMATION + BUY LIST SETTINGS (NEW)
+# CONFIRMATION + BUY LIST SETTINGS
 # =============================
 USE_REGIME_CONFIRM = True          # QQQ market filter
 USE_INTRADAY_60M_CONFIRM = True    # 60m "into close" confirmation
@@ -101,7 +102,7 @@ def _pct_str_to_float(v):
 
 
 # =============================
-# ✅ NEW: SAME NET CALC, BUT FOR ANY SUBSET (NO LOGIC CHANGE)
+# ✅ SAME NET CALC, BUT FOR ANY SUBSET (NO LOGIC CHANGE)
 # =============================
 def _net_stats(df: pd.DataFrame) -> dict:
     """Returns Gain/Loss/Net using EXACT same rules as your current Net calc."""
@@ -125,12 +126,11 @@ def _net_stats(df: pd.DataFrame) -> dict:
     )
 
     net = gain - abs(loss)
-
     return {"gain": gain, "loss": loss, "net": net}
 
 
 # =============================
-# DOWNLOAD
+# DOWNLOAD (DAILY)
 # =============================
 def download_history(ticker: str, end_date: pd.Timestamp) -> pd.DataFrame:
     hist = None
@@ -188,7 +188,6 @@ def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
     close = df["Close"].copy()
     close.index = pd.to_datetime(close.index)
 
-    # keep one extra trading day beyond end_date
     end_plus = end_date_plus_one_trading_day(end_date)
     close = close.loc[close.index <= end_plus].dropna()
 
@@ -200,7 +199,6 @@ def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
 def download_many(tickers: List[str], end_date: pd.Timestamp) -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
 
-    # keep one extra trading day beyond end_date
     end_plus = end_date_plus_one_trading_day(end_date)
 
     for batch in chunks(tickers, 60):
@@ -218,9 +216,7 @@ def download_many(tickers: List[str], end_date: pd.Timestamp) -> Dict[str, pd.Da
             if df is None or df.empty:
                 continue
             df.index = pd.to_datetime(df.index)
-
             df = df.loc[df.index <= end_plus]
-
             if not df.empty:
                 out[t] = df
         time.sleep(0.15)
@@ -298,7 +294,7 @@ def footprint_score(row: pd.Series) -> float:
 
 
 def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
-    """Match ByDate.py bonus logic exactly (no extra bonus rules, no i<60 cutoff)."""
+    """Match ByDate.py bonus logic exactly (no extra bonus rules)."""
     r = d.iloc[i]
     bonus = 0.0
 
@@ -323,13 +319,30 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
 
 
 # =========================================================
-# CONFIRMATION LAYER (NEW)
+# CONFIRMATION LAYER
+#   ✅ FIX: IntradayScore must be calculated for the SAME bar_date
+#           (your old code always used "latest day" and reused it)
 # =========================================================
-def _download_60m(ticker: str, days: int = 10) -> pd.DataFrame:
+
+# Small cache to reduce repeated intraday downloads
+_INTRADAY_CACHE: dict[Tuple[str, str, str], pd.DataFrame] = {}
+
+
+def _download_60m_window(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """
+    Download 60m bars for a specific historical window (works for past end_date).
+    """
+    start_s = pd.to_datetime(start).strftime("%Y-%m-%d")
+    end_s = pd.to_datetime(end).strftime("%Y-%m-%d")
+    key = (ticker, start_s, end_s)
+    if key in _INTRADAY_CACHE:
+        return _INTRADAY_CACHE[key].copy()
+
     try:
         hist = yf.download(
             ticker,
-            period=f"{days}d",
+            start=start_s,
+            end=(pd.to_datetime(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
             interval="60m",
             progress=False,
             auto_adjust=False,
@@ -337,9 +350,11 @@ def _download_60m(ticker: str, days: int = 10) -> pd.DataFrame:
             threads=True,
         )
     except Exception:
+        _INTRADAY_CACHE[key] = pd.DataFrame()
         return pd.DataFrame()
 
     if hist is None or hist.empty:
+        _INTRADAY_CACHE[key] = pd.DataFrame()
         return pd.DataFrame()
 
     # Flatten MultiIndex if present
@@ -354,29 +369,34 @@ def _download_60m(ticker: str, days: int = 10) -> pd.DataFrame:
 
     need = {"Open", "High", "Low", "Close", "Volume"}
     if not need.issubset(set(df.columns)):
+        _INTRADAY_CACHE[key] = pd.DataFrame()
         return pd.DataFrame()
 
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
     df.index = pd.to_datetime(df.index)
 
-    # Drop partial last bar if present
-    if not df.empty:
-        last_ts = df.index[-1]
-        if last_ts.hour == 15 and last_ts.minute >= 30:
-            df = df.iloc[:-1]
-
+    _INTRADAY_CACHE[key] = df.copy()
     return df
 
 
-def intraday_confirm_60m(ticker: str) -> dict:
-    idf = _download_60m(ticker, days=10)
-    if idf.empty or len(idf) < 12:
-        return {"ok": False, "score": 0.0, "reason": "no_60m_data"}
+def intraday_confirm_60m(ticker: str, target_date: pd.Timestamp) -> dict:
+    """
+    Intraday confirm for the SAME day as the daily signal (target_date).
+    Uses last 3 60m bars on that date.
+    """
+    target_dt = pd.to_datetime(target_date).normalize()
 
-    last_day = idf.index[-1].date()
-    day_df = idf[idf.index.date == last_day].copy()
+    # Pull a small window around the target date so we always include that day’s bars
+    start = target_dt - pd.Timedelta(days=5)
+    end = target_dt + pd.Timedelta(days=1)
+
+    idf = _download_60m_window(ticker, start=start, end=end)
+    if idf.empty or len(idf) < 4:
+        return {"ok": False, "score": 0.0, "reason": "no_60m_data_for_target_date"}
+
+    day_df = idf[idf.index.date == target_dt.date()].copy()
     if len(day_df) < 4:
-        return {"ok": False, "score": 0.0, "reason": "not_enough_60m_bars"}
+        return {"ok": False, "score": 0.0, "reason": f"not_enough_60m_bars_for_{target_dt.date()}"}
 
     closes = day_df["Close"].tail(3).astype(float).values
     try:
@@ -405,10 +425,13 @@ def intraday_confirm_60m(ticker: str) -> dict:
         score += 25
 
     ok = score >= MIN_INTRADAY_SCORE
-    return {"ok": ok, "score": float(score), "reason": f"slope={slope:.5f}, closepos={close_pos:.2f}, v_ok={v_ok}"}
+    return {"ok": ok, "score": float(score), "reason": f"date={target_dt.date()}, slope={slope:.5f}, closepos={close_pos:.2f}, v_ok={v_ok}"}
 
 
 def regime_confirm_qqq(end_date: pd.Timestamp) -> dict:
+    """
+    RegimeScore is computed ONCE per run (as your original design).
+    """
     try:
         qqq = yf.download(
             "QQQ",
@@ -471,7 +494,11 @@ def regime_confirm_qqq(end_date: pd.Timestamp) -> dict:
             score += 20
 
     ok = score >= MIN_REGIME_SCORE
-    return {"ok": ok, "score": float(score), "reason": f"QQQ>20SMA={above20}, mom5={mom5.loc[last]:.2f}%, range={rangepct.loc[last]:.2f} vs avg20={r20.loc[last]:.2f}"}
+    return {
+        "ok": ok,
+        "score": float(score),
+        "reason": f"QQQ>20SMA={above20}, mom5={mom5.loc[last]:.2f}%, range={rangepct.loc[last]:.2f} vs avg20={r20.loc[last]:.2f}"
+    }
 
 
 # =============================
@@ -487,6 +514,7 @@ def print_history_output(
 ) -> None:
 
     feats = feats_in.copy()
+
     # runs for BOTH default date and typed date
     bar_dates = feats.index[feats.index <= end_date]
     if len(bar_dates) > 0:
@@ -529,14 +557,10 @@ def print_history_output(
     out = out[out["Score"] >= 60].reset_index(drop=True)
     out.insert(0, "Row", out.index + 1)
 
-    # If no rows, print nothing
     if out.empty:
         return
-    # ==========================================================
-    # EXCLUDE RULE (applies to BOTH default date and typed date):
-    # If bar_date is the latest signal date AND the prior trading
-    # day is also a signal date, then DO NOT print this table.
-    # ==========================================================
+
+    # Exclude rule: consecutive signal days including bar_date
     bar_dates = feats.index[feats.index <= end_date]
     if len(bar_dates) >= 2:
         bar_date = bar_dates[-1]
@@ -550,35 +574,17 @@ def print_history_output(
         bar_is_signal = (out["Signal Date"] == bar_str).any()
         prev_is_signal = (out["Signal Date"] == prev_str).any()
 
-        # If the latest signal is the bar date AND prior day also signal -> suppress all history output
         if bar_is_signal and prev_is_signal and bar_str == latest_signal_str:
             return
 
-    # ===== Compute NET first (before printing anything) =====
     _tmp = out.copy()
     _tmp["NextDay%_num"] = _tmp["NextDay%"].apply(_pct_str_to_float)
     _tmp["NextDayOpen%_num"] = _tmp["NextDayOpen%"].apply(_pct_str_to_float)
     _tmp["NextDayLow%_num"] = _tmp["NextDayLow%"].apply(_pct_str_to_float)
 
-    # ================================
-    # NEW: Min NextDayLow% when Open>0 and NextDay%>1
-    # ================================
-    cond = (
-        (_tmp["NextDayOpen%_num"] > 0) &
-        (_tmp["NextDay%_num"] > 1)
-    )
-
-    min_low_strong_up = (
-        float(_tmp.loc[cond, "NextDayLow%_num"].min())
-        if cond.any()
-        else float("nan")
-    )
-
-    min_low_strong_up_str = (
-        f"{min_low_strong_up:.2f}%"
-        if np.isfinite(min_low_strong_up)
-        else "NONE"
-    )
+    cond = ((_tmp["NextDayOpen%_num"] > 0) & (_tmp["NextDay%_num"] > 1))
+    min_low_strong_up = float(_tmp.loc[cond, "NextDayLow%_num"].min()) if cond.any() else float("nan")
+    min_low_strong_up_str = f"{min_low_strong_up:.2f}%" if np.isfinite(min_low_strong_up) else "NONE"
 
     sum_nextday_when_open_gt0 = float(
         np.where(
@@ -593,10 +599,7 @@ def print_history_output(
     ) if not _tmp.empty else 0.0
 
     sum_open_when_open_lt0 = float(
-        _tmp.loc[
-            _tmp["NextDayOpen%_num"] < 0,
-            "NextDayOpen%_num"
-        ].sum(skipna=True)
+        _tmp.loc[_tmp["NextDayOpen%_num"] < 0, "NextDayOpen%_num"].sum(skipna=True)
     ) if not _tmp.empty else 0.0
 
     net = sum_nextday_when_open_gt0 - abs(sum_open_when_open_lt0)
@@ -605,7 +608,7 @@ def print_history_output(
     if net <= 2:
         return
 
-    # ✅ NEW: Bucket summary (Total / Current / 60s / 70s / 80s / 90s) using SAME Net logic
+    # bucket summary
     current_signal_str = None
     if len(bar_dates) > 0:
         current_signal_str = pd.to_datetime(bar_dates[-1]).strftime("%Y-%m-%d")
@@ -638,7 +641,8 @@ def print_history_output(
         ],
     )
 
-    summary_df = summary_df.applymap(lambda x: f"{x:.2f}%")
+    # ✅ FIX: applymap deprecated
+    summary_df = summary_df.map(lambda x: f"{x:.2f}%")
 
     risk_open_val = float(_tmp["NextDayOpen%_num"].min(skipna=True)) if not _tmp.empty else float("nan")
     risk_open = f"{risk_open_val:.2f}%" if np.isfinite(risk_open_val) else "NONE"
@@ -664,29 +668,21 @@ def print_history_output(
 
     print("\n" + "=" * 61)
     print("SUMMARY".center(61))
-    # --- Current Score = latest signal day score ---
-    bar_dates = feats.index[feats.index <= end_date]
     if len(bar_dates) > 0:
         bar_date = bar_dates[-1]
         i = int(feats.index.get_loc(bar_date))
-        current_score = float(min(
-            100.0,
-            footprint_score(feats.iloc[i]) + confirmation_bonus(feats, i)
-        ))
+        current_score = float(min(100.0, footprint_score(feats.iloc[i]) + confirmation_bonus(feats, i)))
         print(f"Current Score: {current_score:.1f}")
 
-    # ✅ New: bucket table
     print("\n" + "-" * 90)
     print(summary_df.to_string())
     print("-" * 90)
 
     print("\n" + "-" * 67 + "\n")
-
     print(f"  RISK (At Open)                             : {risk_open}")
     print(f"  DATE of RISK (At Open)                     : {risk_open_date}")
     print(f"  QQQ NextDayOpen% on that DATE              : {qqq_day_str}")
     print(f"  MIN NextDayLow% | Open>0 & NextDay%>1      : {min_low_strong_up_str}")
-
     print("\n" + "=" * 67)
 
 
@@ -694,7 +690,7 @@ def print_history_output(
 # MAIN: Scan table + History output ONLY for scan table tickers
 # =============================
 def main() -> None:
-    tickers_raw = "MU,APLD,VWAV,GSIT,RKLB,JMIA,REAL,SNDK,AAOI,LXEO,PL,ZEPP,APPS,WDC,CORZ,ONDS,IREN,RUN,LC,STX,LRCX,SMTC,ARRY,AFRM,APP,ASTS,CEG,BE,DASH,CRWV,PLTR,ALAB,LMND,GEV,MKSI,RBRK,SOFI,KLAC,LITE,CIEN,TSLA,NBIS,FSLR,RDDT,CRDO,SHOP,HWM,CVNA,BROS,VRT,KTOS,TER,TSM,MRVL,COHR,MDB,CRCL,EL,VST,U,WSM,CSIQ,TAK,SNOW,RIOT,BBAI,NU,FIVE,ASML,AMZN,ON,HOOD,AMAT,GLW,EXEL,META,APH,WING,UAL,NVDA,ANET,MSFT,CARR,AMD,ZS,PINS,GOOG,NIO,DOCU,OKTA,ADSK,TEAM,NET,CSCO,C,TTWO,CRWD,ADI,QCOM,BSX,DDOG,BA,TXN,SNPS,FDX,PDD,BIDU,RTX,DIS,AVGO,STM,VEEV,NVTS,NTNX,CDNS,OKLO,TEL,EXPE,GRAB,TT,JCI,WDAY,INTU,IR,INTC,CAT,TVTX,MNDY,ROK,PONY,ZTS,MCHP,RCL,BWA,UBER,PSTG,ERIC,VSH,MIR,GS,VTYX,PANW,DKS,GTLB,FUBO,KC,AIP,SE,STNE,BABA,OPRX,VTRS,GM,FICO,MCD,FLS,NEE,EXPD,FFIV,DAL,IOT,CYBR,AKAM,CPNG,DT,VRNS,TWLO,IBKR,SEDG,FAST,MSCI,IONS,CMI,ZM,FLEX,ATXS,IBN,DKNG,BX,IVZ,ECL,ELAN,APG,RPRX,HDB,BMNR,GRMN,NXPI,V,ENTG,OTEX,CSX,BLK,AON,EMR,ORCL,MCO,CPRT,FLYW,ASAN,AOS,AXP,WRBY,CTSH,MA,SPOT,ADBE,CCL,BKNG,GEHC,HNGE,SCHW,ARM,VCYT,XP,CWAN,FSLY,PATH,EOSE,PAY,VIK,GEO,MMM,TTD,AFL,KO,CFLT,MSTR,BAH,TJX,SONY,EXAS,TRVI,COIN,ICE,ABNB,AAPL,VSTM,HD,CRM,JBL,SOUN,BSY,SWKS,QRVO,ROST,PEP,MSI,ACAD,TDC,ALHC,UL,HUBS,SPGI,KLIC,LIN,JPM,GRRR,FTNT,BAC,NOC,CB,TRI,WMT,HALO,NTAP,NSC,COST,INDV,LMT,DOCS,IDCC,HIMS,UNP,FTV,MS,DECK,HON,LQDA,NFLX,PM,BG,XOM,FISV,IBM,MO,FIS,WFC,HPE,MMYT,DE,FIG,DUOL,ORLY,RBLX,MARA,ZBRA,PG,ACN,FOLD,ADP,OTIS,CLS,NOW,AMT,MORN,ARQT,ELF,CL,CME,TNGX,GALT,PAYX,TEM,COGT,DELL,GLUE,NKTR,FDS,INSM,MVST,FCEL,MBLY,S,AI,FIVN,CEVA,FLNC,T,WTAI,JD,SMCI,BIP,NNE,BOTZ,VZ,HXSCL,AVT,IONQ,CHAT,TRFK,SYNA,TCEHY,GIB,NVT,CAMT,ARW,CHKP,TMUS,MTZ,SAP,ETN,SYK,SMH,TLN,PWR,FN,ISRG,MPWR,FIX,EQIX,RGTI,LOW,SFM,LULU,LEN,TMDX,GLD,AGQ,ALB,LUNR,BMRN,CUK,UUUU,AXTI,INSP,SATS,ANF,NVO,MDLN,DLTR,TECK,ZETA"
+    tickers_raw = "AAPL,MSFT,NVDA,AMZN,META,GOOG,GOOGL,TSLA,AMD,AVGO,NFLX,ORCL,CRM,ADBE,QCOM,TXN,INTC,IBM,CSCO,MU,AMAT,LRCX,KLAC,ASML,TSM,ADI,MRVL,NXPI,MCHP,PANW,CRWD,ZS,FTNT,NET,DDOG,SNOW,MDB,NOW,TEAM,PLTR,COIN,HOOD,SMCI,SHOP,AFRM,CVNA,DASH,ABNB,UBER,LYFT,RBLX,DKNG,RDDT,SOFI,UPST,AI,PATH,FUBO,MARA,RIOT,CLSK,HUT,IREN,ARM,ON,STM,MPWR,QRVO,SWKS,COHR,CIEN,AAOI,LITE,FN,CAMT,TER,KLIC,JPM,BAC,GS,MS,C,WFC,SCHW,IBKR,AXP,V,MA,PYPL,COF,ALLY,XOM,CVX,COP,SLB,HAL,OXY,CAT,DE,ETN,HON,GE,RTX,LMT,NOC,BA,GD,FCX,AA,TECK,CLF,NUE,LLY,NVO,JNJ,MRK,PFE,ABBV,TMO,UNH,CVS,VRTX,REGN,BIIB,GILD,AMGN,BMRN,MRNA,HD,LOW,COST,WMT,TGT,NKE,LULU,ONON,ULTA,ELF,MCD,SBUX,CMG,DPZ,DIS,WBD,ROKU,SPOT,SPY,QQQ,IWM,DIA,SMH,SOXX,XLK,XLF,XLE,XLY,ARKK,TQQQ,SQQQ,ANET,CDNS,SNPS,OKTA,HUBS,VEEV,APP,TWLO,FSLY,DT,DOCU,RNG,FIVE,CHWY,WING,BROS,INTU,ADSK,WDAY,PDD,BIDU,BABA,JD,NTES,TCOM,ZM,PINS,SNAP,MTCH,TTD,UAL,AAL,DAL,LUV,FSLR,ENPH,SEDG,RUN,ARRY,GTLB,ESTC,DBX,ROST,TJX,KSS,KO,PEP,PG,CL,UL,CI,ICE,CME,NDAQ,BK,BLK,TROW,IVZ,ORLY,AZO,TSCO,EOG,DVN,APLD,VWAV,GSIT,RKLB,JMIA,REAL,SNDK,LXEO,PL,ZEPP,APPS,WDC,CORZ,ONDS,LC,STX,SMTC,ASTS,CEG,BE,CRWV,ALAB,LMND,GEV,MKSI,RBRK,NBIS,CRDO,HWM,VRT,KTOS,U,WSM,CSIQ,TAK,BBAI,NU,GLW,EXEL,APH,CARR,TTWO,NIO,BSX,FDX,NVTS,NTNX,OKLO,TEL,EXPE,GRAB,TT,JCI,IR,TVTX,MNDY,ROK,PONY,ZTS,RCL,BWA,PSTG,ERIC,VSH,MIR,VTYX,DKS,KC,AIP,SE,STNE,OPRX,VTRS,GM,FICO,FLS,NEE,EXPD,FFIV,IOT,CYBR,AKAM,FAST,MSCI,IONS,CMI,FLEX,ATXS,IBN,BX,ECL,ELAN,APG,RPRX,HDB,BMNR,GRMN,ENTG,OTEX,CSX,AON,EMR,MCO,CPRT,FLYW,ASAN,AOS,WRBY,CTSH,CCL,BKNG,GEHC,HNGE,VCYT,XP,CWAN,PAY,VIK,GEO,MMM,AFL,CFLT,MSTR,BAH,SONY,EXAS,TRVI,PM,BG,MO,FISV,FIS,HPE,MMYT,FIG,DUOL,ACN,FOLD,ADP,OTIS,CLS,AMT,MORN,ARQT,SPGI,TNGX,GALT,PAYX,TEM,COGT,DELL,GLUE,NKTR,FDS,INSM,MVST,FCEL,MBLY,S,FIVN,CEVA,FLNC,T,WTAI,BIP,NNE,BOTZ,VZ,HXSCL,AVT,IONQ,CHAT,TRFK,SYNA,TCEHY,GIB,NVT,ARW,CHKP,TMUS,MTZ,SAP,SYK,TLN,PWR,ISRG,FIX,EQIX,RGTI,SFM,LEN,TMDX,GLD,AGQ,ALB,LUNR,CUK,UUUU,AXTI,INSP,SATS,ANF,MDLN,DLTR,ZETA"
     date_raw = input("Enter Date YYYY-MM-DD (default ): ").strip()
     single_date_input = bool(date_raw)
 
@@ -705,13 +701,14 @@ def main() -> None:
         raise SystemExit("❌ No tickers entered.")
 
     end_date = roll_end_date(date_raw if date_raw else None)
-    # NEW: Market regime once per run
+
+    # Market regime once per run
     regime = {"ok": True, "score": 50.0, "reason": "regime_disabled"}
     if USE_REGIME_CONFIRM:
         regime = regime_confirm_qqq(end_date)
 
-    MIN_SCORE = 60  # scan table filter so only matches get history
-    MIN_DOLLARVOL = 50_000_000  # match ByDate.py liquidity filter
+    MIN_SCORE = 60
+    MIN_DOLLARVOL = 50_000_000
 
     spy_close = download_spy_close(end_date)
 
@@ -723,8 +720,6 @@ def main() -> None:
 
     scan_rows: list[dict] = []
     feats_map: Dict[str, pd.DataFrame] = {}
-
-    # NEW: confirmation rows for BUY LIST / confirmation table
     confirm_rows: list[dict] = []
 
     for t in tickers:
@@ -736,7 +731,6 @@ def main() -> None:
         feats = add_relative_strength(feats, spy_close)
         feats_map[t] = feats
 
-        # pick bar = exact date if trading day else previous trading day
         bar_date = feats.index[feats.index <= end_date]
         if len(bar_date) == 0:
             continue
@@ -767,16 +761,16 @@ def main() -> None:
             "RS": safe(feats.iloc[i].get("RS", np.nan)),
             "Reasons": "(see History output for full breakdown)",
         })
-        # NEW: Intraday confirm (60m)
+
+        # ✅ FIX: Intraday confirm must use SAME bar_date (signal day)
         intr = {"ok": True, "score": 50.0, "reason": "intraday_disabled"}
         if USE_INTRADAY_60M_CONFIRM:
-            intr = intraday_confirm_60m(t)
+            intr = intraday_confirm_60m(t, bar_date)
 
         dayret = safe(feats.iloc[i].get("DayRetPct", np.nan))
         rscore = float(regime["score"]) if USE_REGIME_CONFIRM else 75.0
         iscore = float(intr["score"]) if USE_INTRADAY_60M_CONFIRM else 75.0
 
-        # Verdict
         verdict = "WATCH"
         if (
             score >= BUY_MIN_SCORE and
@@ -786,7 +780,6 @@ def main() -> None:
         ):
             verdict = "BUY"
 
-        # Hard skip rules
         if (USE_REGIME_CONFIRM and rscore < 60) or (USE_INTRADAY_60M_CONFIRM and iscore < 60):
             verdict = "SKIP"
         if np.isfinite(dayret) and dayret > 12:
@@ -813,10 +806,10 @@ def main() -> None:
         .reset_index(drop=True)
     )
 
-    # ✅ DO NOT CHANGE THIS TABLE (your request)
+    # ✅ DO NOT CHANGE THIS TABLE
     print(scan_df)
 
-    # NEW: BUY LIST + CONFIRM TABLE
+    # BUY LIST + CONFIRM TABLE
     if confirm_rows:
         cdf = pd.DataFrame(confirm_rows)
 
@@ -849,23 +842,15 @@ def main() -> None:
         print("  Sum of NextDay% (Open > 0, cap -1%) means")
         print("  Open>0 and Low <-1  then -1")
         print("  Open>0 and Low >-1 then nextday ")
-
-        print("  Sum of NextDayOpen% (Open < 0)  means")
-        print("                        if Open<0 sum(Open)")
+        print("  Sum of NextDayOpen% (Open < 0) means if Open<0 sum(Open)")
         print("4) Score Rules")
         print("    60+ ignore or watchlist, 70+ is good, 80+ is great, 90+ is rare and dangerous.")
-        print("5)SignalDay good Score But not price much like 1% if next day below rules , buying point")
-        print("   Price stays above signal-day low")
-        print("   Volume is lower than signal day")
-        print("   Candle closes above its midpoint")
-        print("")
         print("********7 Rules*********")
-        print("")
-        print("1. Avoid If more than 6% up on Signal Day ((Reversal low ot high applies same)")
+        print("1. Avoid If more than 6% up on Signal Day")
         print("2. Avoid Consecutive days Or often like repeated in 1 or 2 days")
         print("3. if open minus next Day Sell immediately")
-        print("4. avoid If signal Day is ready for break out (except small candle and small  candle rules). continue research")
-        print("5. avpid down day with Signal Days and less than 1% except same type of candle of previous day")
+        print("4. avoid If signal Day is ready for break out (except small candle rules).")
+        print("5. avoid down day with Signal Days and less than 1% except same candle type of previous day")
 
         # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
         for t in scan_df["Ticker"].tolist():
