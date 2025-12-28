@@ -538,6 +538,14 @@ def build_buy_table_by_date(
         if np.isfinite(dayret) and dayret > 12:
             verdict = "SKIP"
 
+        # ✅ NEW COLUMN ONLY (no logic changes): MeetsCriteria
+        meets_criteria = (
+            np.isfinite(score) and (score >= 72.0) and (score <= 82.0) and
+            (iscore >= 75.0) and
+            (rscore >= 70.0) and
+            np.isfinite(dayret) and (dayret >= 1.0) and (dayret <= 5.0)
+        )
+
         rows.append({
             "Signal Date": sig_date_str,
             "Ticker": ticker,
@@ -545,6 +553,7 @@ def build_buy_table_by_date(
             "DayRetPct": round(dayret, 2) if np.isfinite(dayret) else np.nan,
             "IntradayScore": round(iscore, 1),
             "RegimeScore": round(rscore, 1),
+            "MeetsCriteria": "Yes" if meets_criteria else "No",  # ✅ ADDED
             "Verdict": verdict,
             "Plan": "BUY signal close / sell next day" if verdict == "BUY" else "",
             "IntradayReason": intr.get("reason", ""),
@@ -602,6 +611,50 @@ def print_history_output(
     out = pd.DataFrame(rows)
     out = out.tail(90).reset_index(drop=True)
     out = out[out["Score"] >= min_score].reset_index(drop=True)
+
+    # ✅ NEW COLUMN ONLY (no logic changes): MeetsCriteria for History table
+    # Uses the same metric rules:
+    # Score 72–82, IntradayScore ≥ 75, RegimeScore ≥ 70, DayRetPct 1–5%
+    intraday_scores = []
+    regime_scores = []
+    meets_flags = []
+
+    for _, r in out.iterrows():
+        sig_dt = pd.to_datetime(str(r["Signal Date"]))
+
+        # DayRetPct from feats (numeric)
+        dayret = float("nan")
+        if sig_dt in feats.index:
+            dayret = safe(feats.loc[sig_dt].get("DayRetPct", np.nan))
+
+        # Regime by date
+        regime = {"ok": True, "score": 50.0, "reason": "regime_disabled"}
+        if USE_REGIME_CONFIRM:
+            regime = regime_confirm_qqq_at_date(qqq_daily_df, sig_dt)
+        rscore = float(regime["score"]) if USE_REGIME_CONFIRM else 75.0
+
+        # Intraday by date
+        intr = {"ok": True, "score": 50.0, "reason": "intraday_disabled"}
+        if USE_INTRADAY_60M_CONFIRM:
+            intr = intraday_confirm_60m(ticker, sig_dt)
+        iscore = float(intr["score"]) if USE_INTRADAY_60M_CONFIRM else 75.0
+
+        intraday_scores.append(round(iscore, 1))
+        regime_scores.append(round(rscore, 1))
+
+        score_val = float(r["Score"]) if np.isfinite(r["Score"]) else float("nan")
+        meets_criteria = (
+            np.isfinite(score_val) and (score_val >= 72.0) and (score_val <= 82.0) and
+            (iscore >= 75.0) and
+            (rscore >= 70.0) and
+            np.isfinite(dayret) and (dayret >= 1.0) and (dayret <= 5.0)
+        )
+        meets_flags.append("Yes" if meets_criteria else "No")
+
+    out["IntradayScore"] = intraday_scores
+    out["RegimeScore"] = regime_scores
+    out["MeetsCriteria"] = meets_flags
+
     out.insert(0, "Row", out.index + 1)
 
     if out.empty:
@@ -733,7 +786,7 @@ def print_history_output(
             print("\nTOP BUY CANDIDATES:")
             print(buy_only[["Signal Date", "Ticker", "Score", "DayRetPct", "IntradayScore", "RegimeScore", "Verdict", "Plan"]].to_string(index=False))
         print("\nALL SIGNAL DATES:")
-        print(buy_tbl[["Signal Date", "Ticker", "Score", "DayRetPct", "IntradayScore", "RegimeScore", "Verdict", "Plan"]].to_string(index=False))
+        print(buy_tbl[["Signal Date", "Ticker", "Score", "DayRetPct", "IntradayScore", "RegimeScore", "MeetsCriteria", "Verdict", "Plan"]].to_string(index=False))
 
 
 # =============================
@@ -817,8 +870,6 @@ def main() -> None:
 
     # DO NOT CHANGE THIS TABLE
     print(scan_df)
-
-
 
     for t in scan_df["Ticker"].tolist():
         feats = feats_map.get(t)

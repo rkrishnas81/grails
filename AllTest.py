@@ -33,7 +33,7 @@ BUY_MIN_REGIME = 70.0
 BUY_MIN_INTRADAY = 70.0
 MAX_DAYRET_FOR_BUY = 6.0
 
-PRINT_CONFIRM_TABLE = True
+PRINT_CONFIRM_TABLE = False
 PRINT_BUY_LIST_TOP_N = 5
 
 
@@ -510,6 +510,9 @@ def print_history_output(
     qqq_nextday_open_pct: pd.Series,
     end_date: pd.Timestamp,
     single_date_input: bool,
+    regime_score_for_run: float,               # ✅ NEW (display-only)
+    use_regime_confirm: bool,                 # ✅ NEW (display-only)
+    use_intraday_60m_confirm: bool,           # ✅ NEW (display-only)
     big_day_thresh: float = 12.0,
 ) -> None:
 
@@ -608,6 +611,50 @@ def print_history_output(
     if net <= 2:
         return
 
+    # ===========================
+    # ✅ NEW COLUMN (display-only): MeetsCriteria
+    # Metric  Range
+    # Score   72–82
+    # IntradayScore ≥ 75
+    # RegimeScore   ≥ 70
+    # DayRetPct     1–5%
+    # ===========================
+    # Compute intraday score PER signal date (display only; no effect on any logic/gates)
+    rscore = float(regime_score_for_run) if use_regime_confirm else 75.0
+
+    intraday_score_cache: dict[str, float] = {}
+    intraday_scores: list[float] = []
+    for sig_date_str in out["Signal Date"].astype(str).tolist():
+        if use_intraday_60m_confirm:
+            if sig_date_str in intraday_score_cache:
+                iscore = intraday_score_cache[sig_date_str]
+            else:
+                intr = intraday_confirm_60m(ticker, pd.to_datetime(sig_date_str))
+                iscore = float(intr["score"])
+                intraday_score_cache[sig_date_str] = iscore
+        else:
+            iscore = 75.0
+        intraday_scores.append(iscore)
+
+    out["IntradayScore"] = intraday_scores
+    out["RegimeScore"] = rscore
+
+    out["MeetsCriteria"] = np.where(
+        (out["Score"] >= 72.0) & (out["Score"] <= 82.0) &
+        (out["IntradayScore"] >= 75.0) &
+        (out["RegimeScore"] >= 70.0) &
+        (out["SignalDay%"].apply(_pct_str_to_float) >= 1.0) &
+        (out["SignalDay%"].apply(_pct_str_to_float) <= 5.0),
+        "Yes",
+        "No"
+    )
+
+    # Place MeetsCriteria right after Score (keep table readable)
+    _col = out.pop("MeetsCriteria")
+    _score_idx = list(out.columns).index("Score")
+    out.insert(_score_idx + 1, "MeetsCriteria", _col)
+
+    # ===========================
     # bucket summary
     current_signal_str = None
     if len(bar_dates) > 0:
@@ -770,6 +817,8 @@ def main() -> None:
         dayret = safe(feats.iloc[i].get("DayRetPct", np.nan))
         rscore = float(regime["score"]) if USE_REGIME_CONFIRM else 75.0
         iscore = float(intr["score"]) if USE_INTRADAY_60M_CONFIRM else 75.0
+
+        # ✅ NEW COLUMN (display-only): Yes/No criteria
         meets_criteria = (
             (score >= 72.0) and (score <= 82.0) and
             (iscore >= 75.0) and
@@ -798,11 +847,10 @@ def main() -> None:
             "DayRetPct": round(dayret, 2) if np.isfinite(dayret) else np.nan,
             "RegimeScore": round(rscore, 1),
             "IntradayScore": round(iscore, 1),
-            "MeetsCriteria": "Yes" if meets_criteria else "No",
+            "MeetsCriteria": "Yes" if meets_criteria else "No",  # ✅ NEW
             "Verdict": verdict,
             "Plan": "BUY signal close / sell next day"
         })
-
 
     if not scan_rows:
         print("No matches found.")
@@ -865,7 +913,16 @@ def main() -> None:
             feats = feats_map.get(t)
             if feats is None or feats.empty:
                 continue
-            print_history_output(t, feats, qqq_nextday_open_pct, end_date, single_date_input)
+            print_history_output(
+                t,
+                feats,
+                qqq_nextday_open_pct,
+                end_date,
+                single_date_input,
+                float(regime["score"]),           # ✅ NEW (display-only)
+                USE_REGIME_CONFIRM,               # ✅ NEW (display-only)
+                USE_INTRADAY_60M_CONFIRM,         # ✅ NEW (display-only)
+            )
 
 
 if __name__ == "__main__":
