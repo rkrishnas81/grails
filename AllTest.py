@@ -512,7 +512,8 @@ def print_history_output(
     regime_score_for_run: float,               # ✅ NEW (display-only)
     use_regime_confirm: bool,                 # ✅ NEW (display-only)
     use_intraday_60m_confirm: bool,           # ✅ NEW (display-only)
-    big_day_thresh: float = 12.0,
+    min_day_thresh: float = 2.0,
+    big_day_thresh: float = 6.0,
 ) -> None:
 
     feats = feats_in.copy()
@@ -523,6 +524,8 @@ def print_history_output(
         bar_date = bar_dates[-1]
         dayret = feats.loc[bar_date].get("DayRetPct", np.nan)
         if np.isfinite(dayret) and dayret > big_day_thresh:
+            return
+        if np.isfinite(dayret) and dayret < min_day_thresh:
             return
 
     feats["NextDay%"] = (feats["Close"].shift(-1) / feats["Close"] - 1) * 100
@@ -736,7 +739,7 @@ def print_history_output(
 # MAIN: Scan table + History output ONLY for scan table tickers
 # =============================
 def main() -> None:
-    tickers_raw = "AAPL,MSFT,NVDA,AMZN,META,GOOG,GOOGL,TSLA,AMD,AVGO,NFLX,ORCL,CRM,ADBE,QCOM,TXN,INTC,IBM,CSCO,MU,AMAT,LRCX,KLAC,ASML,TSM,ADI,MRVL,NXPI,MCHP,PANW,CRWD,ZS,FTNT,NET,DDOG,SNOW,MDB,NOW,TEAM,PLTR,COIN,HOOD,SMCI,SHOP,AFRM,CVNA,DASH,UBER,LYFT,RBLX,DKNG,RDDT,SOFI,UPST,AI,PATH,MARA,RIOT,CLSK,HUT,IREN,ARM,ON,STM,MPWR,QRVO,SWKS,COHR,CIEN,AAOI,LITE,FN,CAMT,TER,KLIC,JPM,BAC,GS,MS,C,WFC,SCHW,IBKR,AXP,V,MA,PYPL,COF,ALLY,XOM,CVX,COP,SLB,HAL,OXY,CAT,DE,ETN,HON,GE,RTX,LMT,NOC,BA,GD,FCX,AA,TECK,CLF,NUE,LLY,NVO,JNJ,MRK,PFE,ABBV,TMO,UNH,CVS,VRTX,REGN,BIIB,GILD,AMGN,BMRN,MRNA,HD,LOW,COST,WMT,TGT,NKE,LULU,ONON,ULTA,ELF,MCD,SBUX,CMG,DPZ,DIS,WBD,ROKU,SPOT,SPY,QQQ,IWM,DIA,SOXX,XLK,XLF,XLE,XLY,ARKK,ANET,CDNS,SNPS,OKTA,HUBS,VEEV,APP,TWLO,FSLY,DT,DOCU,RNG,FIVE,CHWY,WING,BROS,INTU,ADSK,WDAY,PDD,BIDU,BABA,JD,NTES,TCOM,ZM,PINS,SNAP,MTCH,TTD,UAL,AAL,DAL,LUV,FSLR,ENPH,SEDG,RUN,ARRY,GTLB,ESTC,DBX,ROST,TJX,KSS,KO,PEP,PG,CL,UL,CI,ICE,CME,NDAQ,BK,BLK,TROW,IVZ,AZO,EOG,DVN,APLD,VWAV,GSIT,RKLB,JMIA,REAL,SNDK,LXEO,PL,ZEPP,APPS,WDC,CORZ,ONDS,LC,STX,SMTC,ASTS,CEG,BE,CRWV,ALAB,LMND,GEV,MKSI,RBRK,NBIS,CRDO,HWM,VRT,KTOS,U,WSM,CSIQ,TAK,BBAI,NU,GLW,EXEL,APH,CARR,TTWO,NIO,BSX,FDX,NVTS,NTNX,OKLO,TEL,EXPE,GRAB,TT,JCI,IR,TVTX,MNDY,ROK,PONY,ZTS,RCL,BWA,PSTG,ERIC,VSH,MIR,DKS,KC,AIP,SE,STNE,VTRS,GM,FICO,FLS,NEE,EXPD,FFIV,IOT,CYBR,AKAM,FAST,MSCI,IONS,CMI,FLEX,ATXS,IBN,BX,ECL,ELAN,APG,RPRX,HDB,BMNR,GRMN,ENTG,OTEX,CSX,AON,EMR,MCO,CPRT,FLYW,ASAN,AOS,WRBY,CTSH,CCL,BKNG,GEHC,HNGE,VCYT,XP,VIK,MMM,AFL,CFLT,MSTR,BAH,EXAS,TRVI,PM,BG,MO,FISV,FIS,HPE,FIG,DUOL,ACN,FOLD,CLS,AMT,MORN,ARQT,SPGI,TNGX,GALT,PAYX,TEM,COGT,DELL,NKTR,FDS,INSM,MVST,FCEL,MBLY,S,FIVN,CEVA,FLNC,T,WTAI,BIP,NNE,VZ,AVT,IONQ,CHAT,TRFK,SYNA,NVT,ARW,SYK,TLN,ISRG,FIX,EQIX,RGTI,SFM,LEN,TMDX,GLD,ALB,LUNR,UUUU,AXTI,INSP,SATS,ANF,DLTR,ZETA,GLSI,RKT,QBTS,AAON,FTAI"
+    tickers_raw = "AAPL,MSFT,NVDA,AMZN,META,GOOG,GOOGL,TSLA,AMD,AVGO,NFLX,ORCL,CRM,ADBE,QCOM,TXN,INTC,IBM,CSCO,MU,AMAT,LRCX,KLAC,ASML,TSM,ADI,MRVL,NXPI,MCHP,PANW,CRWD,ZS,FTNT,NET,DDOG,SNOW,MDB,NOW,TEAM,PLTR,COIN,HOOD,SMCI,SHOP,AFRM,CVNA,DASH,UBER,LYFT,RBLX,DKNG,RDDT,SOFI,UPST,AI,PATH,MARA,RIOT,CLSK,HUT,IREN,ARM,ON,STM,MPWR,QRVO,SWKS,COHR,CIEN,AAOI,LITE,FN,CAMT,TER,KLIC,JPM,BAC,GS,MS,C,WFC,SCHW,IBKR,AXP,V,MA,PYPL,COF,ALLY,XOM,CVX,COP,SLB,HAL,OXY,CAT,DE,ETN,HON,GE,RTX,LMT,NOC,BA,GD,FCX,AA,TECK,CLF,NUE,LLY,NVO,JNJ,MRK,PFE,ABBV,TMO,UNH,CVS,VRTX,REGN,BIIB,GILD,AMGN,BMRN,MRNA,HD,LOW,COST,WMT,TGT,NKE,LULU,ONON,ULTA,ELF,MCD,SBUX,CMG,DPZ,DIS,WBD,ROKU,SPOT,SPY,QQQ,IWM,DIA,SOXX,XLK,XLF,XLE,XLY,ARKK,ANET,CDNS,SNPS,OKTA,HUBS,VEEV,APP,TWLO,FSLY,DT,DOCU,RNG,FIVE,CHWY,WING,BROS,INTU,ADSK,WDAY,PDD,BIDU,BABA,JD,NTES,TCOM,ZM,PINS,SNAP,MTCH,TTD,UAL,AAL,DAL,LUV,FSLR,ENPH,SEDG,RUN,ARRY,GTLB,ESTC,DBX,ROST,TJX,KSS,KO,PEP,PG,CL,UL,CI,ICE,CME,NDAQ,BK,BLK,TROW,IVZ,AZO,EOG,DVN,APLD,VWAV,GSIT,RKLB,JMIA,REAL,SNDK,LXEO,PL,ZEPP,APPS,WDC,CORZ,ONDS,LC,STX,SMTC,ASTS,CEG,BE,CRWV,ALAB,LMND,GEV,MKSI,RBRK,NBIS,CRDO,HWM,VRT,KTOS,U,WSM,CSIQ,TAK,BBAI,NU,GLW,EXEL,APH,CARR,TTWO,NIO,BSX,FDX,NVTS,NTNX,OKLO,TEL,EXPE,GRAB,TT,JCI,IR,TVTX,MNDY,ROK,PONY,ZTS,RCL,BWA,PSTG,ERIC,VSH,MIR,DKS,KC,AIP,SE,STNE,VTRS,GM,FICO,FLS,NEE,EXPD,FFIV,IOT,CYBR,AKAM,FAST,MSCI,IONS,CMI,FLEX,ATXS,IBN,BX,ECL,ELAN,APG,RPRX,HDB,BMNR,GRMN,ENTG,OTEX,CSX,AON,EMR,MCO,CPRT,FLYW,ASAN,AOS,WRBY,CTSH,CCL,BKNG,GEHC,HNGE,VCYT,XP,VIK,MMM,AFL,CFLT,MSTR,BAH,EXAS,TRVI,PM,BG,MO,FISV,FIS,HPE,FIG,DUOL,ACN,FOLD,CLS,AMT,MORN,SPGI,PAYX,TEM,COGT,DELL,FDS,INSM,MBLY,S,FLNC,NNE,VZ,IONQ,NVT,SYK,TLN,ISRG,FIX,EQIX,RGTI,SFM,LEN,TMDX,GLD,ALB,LUNR,UUUU,AXTI,INSP,SATS,ANF,DLTR,ZETA,RKT,QBTS,AAON,FTAI"
     date_raw = input("Enter Date YYYY-MM-DD (default ): ").strip()
     single_date_input = bool(date_raw)
 
@@ -903,7 +906,7 @@ def main() -> None:
         print("4) Score Rules")
         print("    60+ ignore or watchlist, 70+ is good, 80+ is great, 90+ is rare and dangerous.")
         print("********7 Rules*********")
-        print("1. Avoid If more than 6% up on Signal Day")
+        print("1. Only Min 2% to Max 6% up on Signal Day")
         print("2. Avoid Consecutive days Or often like repeated in 1 or 2 days")
         print("3. if open minus next Day Sell immediately")
         print("4. avoid If signal Day is ready for break out (except small candle rules).")
@@ -914,16 +917,21 @@ def main() -> None:
             feats = feats_map.get(t)
             if feats is None or feats.empty:
                 continue
+
             print_history_output(
                 t,
                 feats,
                 qqq_nextday_open_pct,
                 end_date,
                 single_date_input,
-                float(regime["score"]),           # ✅ NEW (display-only)
-                USE_REGIME_CONFIRM,               # ✅ NEW (display-only)
-                USE_INTRADAY_60M_CONFIRM,         # ✅ NEW (display-only)
+                float(regime["score"]),
+                USE_REGIME_CONFIRM,
+                USE_INTRADAY_60M_CONFIRM,
+                min_day_thresh=2.0,
+                big_day_thresh=6.0,
             )
+
+
 
 
 if __name__ == "__main__":
