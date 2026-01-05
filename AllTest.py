@@ -881,6 +881,9 @@ def main() -> None:
 
     # ✅ DO NOT CHANGE THIS TABLE
     print(scan_df)
+    # Print tickers from scan table (comma-separated, no spaces)
+    print("\n" + ",".join(scan_df["Ticker"].astype(str).tolist()))
+
 
     # BUY LIST + CONFIRM TABLE
     if confirm_rows:
