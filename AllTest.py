@@ -35,7 +35,11 @@ MAX_DAYRET_FOR_BUY = 6.0
 
 PRINT_CONFIRM_TABLE = False
 PRINT_BUY_LIST_TOP_N = 5
-EARNINGS_EXCLUDE_DAYS = 5
+# =============================
+# EARNINGS FILTER SETTINGS
+# =============================
+EARNINGS_EXCLUDE_DAYS = 5   # change this anytime (5 = next 5 days, 0 = today only, -1 = disable)
+
 
 
 # =============================
@@ -106,72 +110,38 @@ def _pct_str_to_float(v):
         return float(v)
     except Exception:
         return np.nan
-
-
 # =============================
-# ✅ EARNINGS EXCLUSION (exclude if earnings date is within next 5 days)
+# EARNINGS DATE (NEXT) - cached
 # =============================
-_EARNINGS_CACHE: dict[str, pd.Timestamp | None] = {}
+_EARNINGS_CACHE: dict[str, str] = {}
 
-def _next_earnings_date(ticker: str) -> pd.Timestamp | None:
-    t = str(ticker).upper().replace(".", "-").strip()
+def get_next_earnings_date_str(ticker: str) -> str:
+    """
+    Returns next earnings date as 'YYYY-MM-DD' (or '' if unavailable).
+    Uses yfinance get_earnings_dates(limit=1).
+    Cached to avoid repeated calls.
+    """
+    t = ticker.upper().replace(".", "-").strip()
     if not t:
-        return None
+        return ""
+
     if t in _EARNINGS_CACHE:
         return _EARNINGS_CACHE[t]
 
     try:
-        tk = yf.Ticker(t)
-        # Prefer earnings dates table (often includes upcoming)
-        try:
-            edf = tk.get_earnings_dates(limit=12)
-        except Exception:
-            edf = None
+        edf = yf.Ticker(t).get_earnings_dates(limit=1)
+        if edf is None or edf.empty:
+            _EARNINGS_CACHE[t] = ""
+            return ""
 
-        nxt = None
-        if edf is not None and not edf.empty:
-            # yfinance usually returns index as datetime-like
-            idx = pd.to_datetime(edf.index, errors="coerce")
-            idx = idx.dropna()
-            if len(idx) > 0:
-                idx = idx.sort_values()
-                # choose the first future-ish date (including today)
-                nxt = idx[0]
-
-        if nxt is None:
-            # Fallback to calendar (varies by ticker/data availability)
-            cal = getattr(tk, "calendar", None)
-            if cal is not None and isinstance(cal, pd.DataFrame) and not cal.empty:
-                # try common label
-                cand = None
-                for k in ["Earnings Date", "EarningsDate", "Earnings"]:
-                    if k in cal.index:
-                        v = cal.loc[k].values
-                        if len(v) > 0:
-                            cand = v[0]
-                        break
-                if cand is not None:
-                    dt = pd.to_datetime(cand, errors="coerce")
-                    if pd.notna(dt):
-                        nxt = pd.Timestamp(dt).tz_localize(None) if getattr(dt, "tzinfo", None) else pd.Timestamp(dt)
-
-        if nxt is not None:
-            nxt = pd.Timestamp(nxt).tz_localize(None) if getattr(nxt, "tzinfo", None) else pd.Timestamp(nxt)
-
-        _EARNINGS_CACHE[t] = nxt
-        return nxt
+        # yfinance stores earnings datetime in the index
+        dt = pd.to_datetime(edf.index[0])
+        out = dt.strftime("%Y-%m-%d")
+        _EARNINGS_CACHE[t] = out
+        return out
     except Exception:
-        _EARNINGS_CACHE[t] = None
-        return None
-
-
-def earnings_within_next_days(ticker: str, ref_date: pd.Timestamp, days: int = EARNINGS_EXCLUDE_DAYS) -> bool:
-    nxt = _next_earnings_date(ticker)
-    if nxt is None:
-        return False
-    d0 = pd.to_datetime(ref_date).normalize()
-    d1 = (d0 + pd.Timedelta(days=days)).normalize()
-    return (nxt.normalize() >= d0) and (nxt.normalize() <= d1)
+        _EARNINGS_CACHE[t] = ""
+        return ""
 
 
 # =============================
@@ -813,7 +783,7 @@ def print_history_output(
 # MAIN: Scan table + History output ONLY for scan table tickers
 # =============================
 def main() -> None:
-    tickers_raw = "A,AA,AAL,AAOI,AAON,AAPL,ABBV,ABVX,ACN,ADI,AEE,AEM,AEP,AER,AFL,AI,AIG,AKAM,ALK,ALLY,ALNY,AMAT,AMD,AMGN,AMP,AMT,ANF,AON,APG,APH,APLD,APO,APP,ARRY,ARW,ASTS,ATI,ATXS,AU,AVAV,AVGO,AVT,AVY,AXP,AXTI,AZO,B,BA,BABA,BAC,BAH,BBAI,BBY,BDX,BG,BIDU,BIIB,BILL,BKNG,BLK,BMNR,BMRN,BROS,BWA,C,CAH,CAMT,CARR,CAT,CB,CCL,CDNS,CF,CG,CHKP,CHRW,CI,CIEN,CL,CLS,CLSK,CMA,CMI,COF,COHR,COIN,COR,CORT,COST,CPT,CRDO,CRH,CRL,CRS,CSCO,CSIQ,CSX,CTSH,CUK,CVS,CVX,CWAN,DAL,DASH,DBX,DELL,DHR,DKNG,DKS,DLR,DOCU,DT,DUOL,ECL,ED,EL,ELAN,ELV,EMR,EOG,EPAM,EQIX,ERIC,ESTC,ETR,EXAS,EXE,EXPE,FANG,FCEL,FCX,FDS,FICO,FIG,FIS,FIVE,FIX,FLEX,FLNC,FLS,FLYW,FN,FNV,FOXA,FROG,FSLR,GE,GILD,GLW,GM,GOOG,GOOGL,GPC,GS,GTLB,HAL,HALO,HCA,HDB,HIG,HLT,HON,HOOD,HPE,HUM,HWM,IBKR,IBN,ICE,ILMN,INSM,INSP,INTC,INTU,IONQ,IONS,IOT,IQV,IR,IREN,IRM,ISRG,IT,IVZ,J,JBHT,JBL,JCI,JD,JKHY,JMIA,JPM,KEYS,KKR,KLAC,KLIC,KRMN,KTOS,KVYO,LC,LDOS,LEU,LITE,LLY,LMT,LOW,LPLA,LRCX,LSCC,LUV,LXEO,LYFT,MA,MAA,MBLY,MCD,MCHP,MDB,MDT,META,MIDD,MIR,MKSI,MMM,MMYT,MNDY,MORN,MP,MPWR,MRK,MS,MSCI,MSFT,MTB,MTN,MTSI,MTZ,MU,NBIS,NBIX,NDAQ,NEE,NEM,NET,NIO,NKE,NNE,NOC,NTES,NTNX,NTRA,NTRS,NUE,NVDA,NVO,NVS,NVT,NVTS,NXPI,NXT,OKLO,OKTA,OMC,ON,ONDS,ONON,ONTO,ORCL,OXY,PAAS,PATH,PAY,PBF,PCAR,PEGA,PEP,PFE,PG,PLD,PLNT,PLTR,PM,PNFP,PSTG,PSX,QBTS,RACE,RBLX,RDDT,RGLD,RIVN,RJF,RNG,ROK,ROKU,ROST,RTX,RUN,RY,SAP,SATS,SBUX,SCHW,SE,SEI,SFM,SGI,SHOP,SLB,SMCI,SN,SNAP,SNDK,SNX,SONY,SRE,STE,STLD,STM,STNE,STRL,STT,STX,SYK,SYNA,TAK,TEAM,TECH,TECK,TEL,TER,TJX,TMO,TROW,TSLA,TSM,TTD,TVTX,TXRH,U,UAL,UBER,UHS,UL,ULTA,UNH,UPS,USAR,UUUU,V,VRT,VSH,VTRS,W,WBD,WDC,WFC,WING,WMT,WPM,WRBY,WSM,WST,WYNN,XOM,XP,ZEPP,ZETA,ZM,ZS,ZTS,SKY,ZIM,VSAT,AMZN"
+    tickers_raw = "A,AA,AAL,AAOI,AAON,AAPL,ABBV,ABVX,ACN,ADI,AEE,AEM,AEP,AER,AFL,AI,AIG,AKAM,ALK,ALLY,ALNY,AMAT,AMD,AMGN,AMP,AMT,ANF,AON,APG,APH,APLD,APO,APP,ARRY,ARW,ASTS,ATI,ATXS,AU,AVAV,AVGO,AVT,AVY,AXP,AXTI,AZO,B,BA,BABA,BAC,BAH,BBAI,BBY,BDX,BG,BIDU,BIIB,BILL,BKNG,BLK,BMNR,BMRN,BROS,BWA,C,CAH,CAMT,CARR,CAT,CB,CCL,CDNS,CF,CG,CHKP,CHRW,CI,CIEN,CL,CLS,CLSK,CMA,CMI,COF,COHR,COIN,COR,CORT,COST,CPT,CRDO,CRH,CRL,CRS,CSCO,CSIQ,CSX,CTSH,CUK,CVS,CVX,CWAN,DAL,DASH,DBX,DELL,DHR,DKNG,DKS,DLR,DOCU,DT,DUOL,ECL,ED,EL,ELAN,ELF,ELV,EMR,EOG,EPAM,EQIX,ERIC,ESTC,ETR,EXAS,EXE,EXPE,FANG,FCEL,FCX,FDS,FICO,FIG,FIS,FIVE,FIX,FLEX,FLNC,FLS,FLYW,FN,FNV,FOXA,FROG,FSLR,GE,GILD,GLW,GM,GOOG,GOOGL,GPC,GS,GTLB,HAL,HALO,HCA,HDB,HIG,HLT,HON,HOOD,HPE,HUM,HWM,IBKR,IBN,ICE,ILMN,INSM,INSP,INTC,INTU,IONQ,IONS,IOT,IQV,IR,IREN,IRM,ISRG,IT,IVZ,J,JBHT,JBL,JCI,JD,JKHY,JMIA,JPM,KEYS,KKR,KLAC,KLIC,KRMN,KTOS,KVYO,LC,LDOS,LEU,LITE,LLY,LMT,LOW,LPLA,LRCX,LSCC,LUV,LXEO,LYFT,MA,MAA,MBLY,MCD,MCHP,MDB,MDT,META,MIDD,MIR,MKSI,MMM,MMYT,MNDY,MORN,MP,MPWR,MRK,MS,MSCI,MSFT,MTB,MTN,MTSI,MTZ,MU,NBIS,NBIX,NDAQ,NEE,NEM,NET,NIO,NKE,NNE,NOC,NTES,NTNX,NTRA,NTRS,NUE,NVDA,NVO,NVS,NVT,NVTS,NXPI,NXT,OKLO,OKTA,OMC,ON,ONDS,ONON,ONTO,ORCL,OXY,PAAS,PATH,PAY,PBF,PCAR,PEGA,PEP,PFE,PG,PLD,PLNT,PLTR,PM,PNFP,PSTG,PSX,QBTS,RACE,RBLX,RDDT,RGLD,RIVN,RJF,RNG,ROK,ROKU,ROST,RTX,RUN,RY,SAP,SATS,SBUX,SCHW,SE,SEI,SFM,SGI,SHOP,SLB,SMCI,SN,SNAP,SNDK,SNX,SONY,SRE,STE,STLD,STM,STNE,STRL,STT,STX,SYK,SYNA,TAK,TEAM,TECH,TECK,TEL,TER,TJX,TMO,TROW,TSLA,TSM,TTD,TVTX,TXRH,U,UAL,UBER,UHS,UL,ULTA,UNH,UPS,USAR,UUUU,V,VRT,VSH,VTRS,VTYX,W,WBD,WDC,WFC,WING,WMT,WPM,WRBY,WSM,WST,WYNN,XOM,XP,ZEPP,ZETA,ZM,ZS,ZTS,SKY,ZIM,VSAT,AMZN"
     
     exclude_raw = input("Exclude tickers (optional, comma-separated): ").strip()
     date_raw = input("Enter Date YYYY-MM-DD (default ): ").strip()
@@ -875,10 +845,6 @@ def main() -> None:
 
         dollar_vol = safe(feats.iloc[i].get("DollarVol", np.nan))
         if np.isfinite(dollar_vol) and dollar_vol < MIN_DOLLARVOL:
-            continue
-
-        # ✅ Earnings exclusion: skip ticker if earnings within next 5 days (from end_date)
-        if earnings_within_next_days(t, end_date, days=5):
             continue
 
         scan_rows.append({
@@ -949,6 +915,18 @@ def main() -> None:
         .sort_values(["Score", "VolRel", "DollarVol"], ascending=False)
         .reset_index(drop=True)
     )
+    scan_df["EarningsDate"] = scan_df["Ticker"].apply(get_next_earnings_date_str)
+
+    # ✅ Exclude tickers with earnings in the next N days (controlled by EARNINGS_EXCLUDE_DAYS)
+    if EARNINGS_EXCLUDE_DAYS >= 0:
+        _e_ts = pd.to_datetime(scan_df["EarningsDate"], errors="coerce").dt.normalize()
+        _ref = pd.to_datetime(end_date).normalize()
+        _days = (_e_ts - _ref).dt.days
+
+        scan_df = scan_df[
+            _e_ts.isna() | ~((_days >= 0) & (_days <= EARNINGS_EXCLUDE_DAYS))
+        ].reset_index(drop=True)
+
 
     # ✅ DO NOT CHANGE THIS 
     print(scan_df)
@@ -1002,6 +980,7 @@ def main() -> None:
         print("  Open>0 and Low <-1  then -1")
         print("  Open>0 and Low >-1 then nextday ")
         print("  Sum of NextDayOpen% (Open < 0) means if Open<0 sum(Open)")
+        print(f"  Earnings filter: exclude tickers with earnings in the next {EARNINGS_EXCLUDE_DAYS} day(s). (-1 = disabled)")
         print("4) Score Rules")
         print("    60+ ignore or watchlist, 70+ is good, 80+ is great, 90+ is rare and dangerous.")
         print("********7 Rules*********")
