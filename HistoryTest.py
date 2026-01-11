@@ -772,9 +772,7 @@ def print_history_output(
         qqq_daily_df=qqq_daily_df,
     )
 
-    print("\n" + "=" * 90)
-    print("BUY LIST (by date) — buy close / sell next day")
-    print("=" * 90)
+    
 
     if buy_tbl.empty:
         print("No Signal Dates to evaluate.")
@@ -785,8 +783,7 @@ def print_history_output(
             buy_only = buy_only.sort_values(["Score", "IntradayScore", "RegimeScore"], ascending=False).head(PRINT_BUY_LIST_TOP_N)
             print("\nTOP BUY CANDIDATES:")
             print(buy_only[["Signal Date", "Ticker", "Score", "DayRetPct", "IntradayScore", "RegimeScore", "Verdict", "Plan"]].to_string(index=False))
-        print("\nALL SIGNAL DATES:")
-        print(buy_tbl[["Signal Date", "Ticker", "Score", "DayRetPct", "IntradayScore", "RegimeScore", "MeetsCriteria", "Verdict", "Plan"]].to_string(index=False))
+        
 
 
 # =============================
