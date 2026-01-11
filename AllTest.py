@@ -20,20 +20,11 @@ pd.set_option("display.colheader_justify", "center")
 
 
 # =============================
-# CONFIRMATION + BUY LIST SETTINGS
+# BUY LIST SETTINGS
 # =============================
-USE_REGIME_CONFIRM = True          # QQQ market filter
-USE_INTRADAY_60M_CONFIRM = True    # 60m "into close" confirmation
-
-MIN_REGIME_SCORE = 60.0
-MIN_INTRADAY_SCORE = 60.0
-
 BUY_MIN_SCORE = 70.0
-BUY_MIN_REGIME = 60.0              # ✅ CHANGED (was 70.0)
-BUY_MIN_INTRADAY = 70.0
 MAX_DAYRET_FOR_BUY = 6.0
 
-PRINT_CONFIRM_TABLE = False
 PRINT_BUY_LIST_TOP_N = 5
 # =============================
 # EARNINGS FILTER SETTINGS
@@ -361,188 +352,6 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
     return float(min(35.0, bonus))
 
 
-# =========================================================
-# CONFIRMATION LAYER
-#   ✅ FIX: IntradayScore must be calculated for the SAME bar_date
-# =========================================================
-
-# Small cache to reduce repeated intraday downloads
-_INTRADAY_CACHE: dict[Tuple[str, str, str], pd.DataFrame] = {}
-
-
-def _download_60m_window(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """
-    Download 60m bars for a specific historical window (works for past end_date).
-    """
-    start_s = pd.to_datetime(start).strftime("%Y-%m-%d")
-    end_s = pd.to_datetime(end).strftime("%Y-%m-%d")
-    key = (ticker, start_s, end_s)
-    if key in _INTRADAY_CACHE:
-        return _INTRADAY_CACHE[key].copy()
-
-    try:
-        hist = yf.download(
-            ticker,
-            start=start_s,
-            end=(pd.to_datetime(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-            interval="60m",
-            progress=False,
-            auto_adjust=False,
-            group_by="ticker",
-            threads=True,
-        )
-    except Exception:
-        _INTRADAY_CACHE[key] = pd.DataFrame()
-        return pd.DataFrame()
-
-    if hist is None or hist.empty:
-        _INTRADAY_CACHE[key] = pd.DataFrame()
-        return pd.DataFrame()
-
-    # Flatten MultiIndex if present
-    if isinstance(hist.columns, pd.MultiIndex):
-        if ticker in hist.columns.get_level_values(0):
-            df = hist[ticker].copy()
-        else:
-            first_key = hist.columns.get_level_values(0)[0]
-            df = hist[first_key].copy()
-    else:
-        df = hist.copy()
-
-    need = {"Open", "High", "Low", "Close", "Volume"}
-    if not need.issubset(set(df.columns)):
-        _INTRADAY_CACHE[key] = pd.DataFrame()
-        return pd.DataFrame()
-
-    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
-    df.index = pd.to_datetime(df.index)
-
-    _INTRADAY_CACHE[key] = df.copy()
-    return df
-
-
-def intraday_confirm_60m(ticker: str, target_date: pd.Timestamp) -> dict:
-    """
-    Intraday confirm for the SAME day as the daily signal (target_date).
-    Uses last 3 60m bars on that date.
-    """
-    target_dt = pd.to_datetime(target_date).normalize()
-
-    # Pull a small window around the target date so we always include that day’s bars
-    start = target_dt - pd.Timedelta(days=5)
-    end = target_dt + pd.Timedelta(days=1)
-
-    idf = _download_60m_window(ticker, start=start, end=end)
-    if idf.empty or len(idf) < 4:
-        return {"ok": False, "score": 0.0, "reason": "no_60m_data_for_target_date"}
-
-    day_df = idf[idf.index.date == target_dt.date()].copy()
-    if len(day_df) < 4:
-        return {"ok": False, "score": 0.0, "reason": f"not_enough_60m_bars_for_{target_dt.date()}"}
-
-    closes = day_df["Close"].tail(3).astype(float).values
-    try:
-        slope = float(np.polyfit(np.arange(len(closes)), closes, 1)[0])
-    except Exception:
-        slope = 0.0
-
-    last = day_df.iloc[-1]
-    hi = float(last["High"])
-    lo = float(last["Low"])
-    cl = float(last["Close"])
-
-    rng = (hi - lo) if (hi > lo) else np.nan
-    close_pos = ((cl - lo) / rng) if np.isfinite(rng) and rng != 0 else 0.0
-
-    v_last3 = float(day_df["Volume"].tail(3).astype(float).mean())
-    v_med = float(day_df["Volume"].astype(float).median())
-    v_ok = (v_med > 0) and (v_last3 >= 0.8 * v_med)
-
-    score = 0.0
-    if slope > 0:
-        score += 40
-    if close_pos >= 0.60:
-        score += 35
-    if v_ok:
-        score += 25
-
-    ok = score >= MIN_INTRADAY_SCORE
-    return {"ok": ok, "score": float(score), "reason": f"date={target_dt.date()}, slope={slope:.5f}, closepos={close_pos:.2f}, v_ok={v_ok}"}
-
-
-def regime_confirm_qqq(end_date: pd.Timestamp) -> dict:
-    """
-    RegimeScore is computed ONCE per run (as your original design).
-    """
-    try:
-        qqq = yf.download(
-            "QQQ",
-            period="6mo",
-            interval="1d",
-            progress=False,
-            auto_adjust=False,
-            group_by="ticker",
-            threads=True,
-        )
-    except Exception:
-        return {"ok": True, "score": 50.0, "reason": "qqq_download_failed_default_ok"}
-
-    if qqq is None or qqq.empty:
-        return {"ok": True, "score": 50.0, "reason": "qqq_empty_default_ok"}
-
-    # Flatten MultiIndex if present
-    if isinstance(qqq.columns, pd.MultiIndex):
-        if "QQQ" in qqq.columns.get_level_values(0):
-            q = qqq["QQQ"].copy()
-        else:
-            first_key = qqq.columns.get_level_values(0)[0]
-            q = qqq[first_key].copy()
-    else:
-        q = qqq.copy()
-
-    need = {"Close", "High", "Low"}
-    if not need.issubset(set(q.columns)):
-        return {"ok": True, "score": 50.0, "reason": "qqq_missing_cols_default_ok"}
-
-    q.index = pd.to_datetime(q.index)
-    q = q.loc[q.index <= end_date].dropna(subset=["Close", "High", "Low"])
-    if len(q) < 30:
-        return {"ok": True, "score": 50.0, "reason": "qqq_short_history_default_ok"}
-
-    close = q["Close"].astype(float)
-    high = q["High"].astype(float)
-    low = q["Low"].astype(float)
-
-    sma20 = close.rolling(20).mean()
-    mom5 = (close / close.shift(5) - 1) * 100
-
-    prev = close.shift(1)
-    rangepct = ((high - low) / prev) * 100
-    r20 = rangepct.rolling(20).mean()
-
-    last = close.index[-1]
-
-    score = 0.0
-    above20 = bool(close.loc[last] > sma20.loc[last]) if np.isfinite(sma20.loc[last]) else False
-    mom_ok = bool(mom5.loc[last] > 0) if np.isfinite(mom5.loc[last]) else False
-
-    if above20:
-        score += 45
-    if mom_ok:
-        score += 35
-
-    if np.isfinite(rangepct.loc[last]) and np.isfinite(r20.loc[last]) and r20.loc[last] > 0:
-        if rangepct.loc[last] <= 1.5 * r20.loc[last]:
-            score += 20
-
-    ok = score >= MIN_REGIME_SCORE
-    return {
-        "ok": ok,
-        "score": float(score),
-        "reason": f"QQQ>20SMA={above20}, mom5={mom5.loc[last]:.2f}%, range={rangepct.loc[last]:.2f} vs avg20={r20.loc[last]:.2f}"
-    }
-
-
 # =============================
 # HISTORY OUTPUT (per ticker): PRINT NOTHING unless Net (Gain - Loss) > 2
 # =============================
@@ -552,9 +361,6 @@ def print_history_output(
     qqq_nextday_open_pct: pd.Series,
     end_date: pd.Timestamp,
     single_date_input: bool,
-    regime_score_for_run: float,               # ✅ NEW (display-only)
-    use_regime_confirm: bool,                 # ✅ NEW (display-only)
-    use_intraday_60m_confirm: bool,           # ✅ NEW (display-only)
     min_day_thresh: float = 2.0,
     big_day_thresh: float = 6.0,
 ) -> None:
@@ -658,49 +464,6 @@ def print_history_output(
         return
 
     # ===========================
-    # ✅ NEW COLUMN (display-only): MeetsCriteria
-    # Metric  Range
-    # Score         72–82
-    # IntradayScore ≥ 75
-    # RegimeScore   ≥ 60   ✅ CHANGED (was 70)
-    # DayRetPct     1–5%
-    # ===========================
-    # Compute intraday score PER signal date (display only; no effect on any logic/gates)
-    rscore = float(regime_score_for_run) if use_regime_confirm else 75.0
-
-    intraday_score_cache: dict[str, float] = {}
-    intraday_scores: list[float] = []
-    for sig_date_str in out["Signal Date"].astype(str).tolist():
-        if use_intraday_60m_confirm:
-            if sig_date_str in intraday_score_cache:
-                iscore = intraday_score_cache[sig_date_str]
-            else:
-                intr = intraday_confirm_60m(ticker, pd.to_datetime(sig_date_str))
-                iscore = float(intr["score"])
-                intraday_score_cache[sig_date_str] = iscore
-        else:
-            iscore = 75.0
-        intraday_scores.append(iscore)
-
-    out["IntradayScore"] = intraday_scores
-    out["RegimeScore"] = rscore
-
-    out["MeetsCriteria"] = np.where(
-        (out["Score"] >= 72.0) & (out["Score"] <= 82.0) &
-        (out["IntradayScore"] >= 75.0) &
-        (out["RegimeScore"] >= 60.0) &   # ✅ CHANGED (was 70.0)
-        (out["SignalDay%"].apply(_pct_str_to_float) >= 1.0) &
-        (out["SignalDay%"].apply(_pct_str_to_float) <= 5.0),
-        "Yes",
-        "No"
-    )
-
-    # Place MeetsCriteria right after Score (keep table readable)
-    _col = out.pop("MeetsCriteria")
-    _score_idx = list(out.columns).index("Score")
-    out.insert(_score_idx + 1, "MeetsCriteria", _col)
-
-    # ===========================
     # bucket summary
     current_signal_str = None
     if len(bar_dates) > 0:
@@ -801,11 +564,6 @@ def main() -> None:
 
     end_date = roll_end_date(date_raw if date_raw else None)
 
-    # Market regime once per run
-    regime = {"ok": True, "score": 50.0, "reason": "regime_disabled"}
-    if USE_REGIME_CONFIRM:
-        regime = regime_confirm_qqq(end_date)
-
     MIN_SCORE = 60
     MIN_DOLLARVOL = 50_000_000
 
@@ -856,41 +614,17 @@ def main() -> None:
             "BaseScore": base,
             "Bonus": bonus,
             "Close": safe(feats.iloc[i].get("Close", np.nan)),
-            "DayRetPct": safe(feats.iloc[i].get("DayRetPct", np.nan)),
-            "VolRel": safe(feats.iloc[i].get("VolRel", np.nan)),
-            "DollarVol": dollar_vol,
-            "RS": safe(feats.iloc[i].get("RS", np.nan)),
-            "Reasons": "(see History output for full breakdown)",
         })
 
-        # ✅ FIX: Intraday confirm must use SAME bar_date (signal day)
-        intr = {"ok": True, "score": 50.0, "reason": "intraday_disabled"}
-        if USE_INTRADAY_60M_CONFIRM:
-            intr = intraday_confirm_60m(t, bar_date)
-
         dayret = safe(feats.iloc[i].get("DayRetPct", np.nan))
-        rscore = float(regime["score"]) if USE_REGIME_CONFIRM else 75.0
-        iscore = float(intr["score"]) if USE_INTRADAY_60M_CONFIRM else 75.0
-
-        # ✅ NEW COLUMN (display-only): Yes/No criteria
-        meets_criteria = (
-            (score >= 72.0) and (score <= 82.0) and
-            (iscore >= 75.0) and
-            (rscore >= 60.0) and         # ✅ CHANGED (was 70.0)
-            np.isfinite(dayret) and (dayret >= 1.0) and (dayret <= 5.0)
-        )
 
         verdict = "WATCH"
         if (
             score >= BUY_MIN_SCORE and
-            rscore >= BUY_MIN_REGIME and
-            iscore >= BUY_MIN_INTRADAY and
             np.isfinite(dayret) and dayret <= MAX_DAYRET_FOR_BUY
         ):
             verdict = "BUY"
 
-        if (USE_REGIME_CONFIRM and rscore < 60) or (USE_INTRADAY_60M_CONFIRM and iscore < 60):
-            verdict = "SKIP"
         if np.isfinite(dayret) and dayret > 12:
             verdict = "SKIP"
 
@@ -899,9 +633,6 @@ def main() -> None:
             "BarDate": bar_date.strftime("%Y-%m-%d"),
             "Score": round(score, 1),
             "DayRetPct": round(dayret, 2) if np.isfinite(dayret) else np.nan,
-            "RegimeScore": round(rscore, 1),
-            "IntradayScore": round(iscore, 1),
-            "MeetsCriteria": "Yes" if meets_criteria else "No",  # ✅ NEW
             "Verdict": verdict,
             "Plan": "BUY signal close / sell next day"
         })
@@ -912,7 +643,7 @@ def main() -> None:
 
     scan_df = (
         pd.DataFrame(scan_rows)
-        .sort_values(["Score", "VolRel", "DollarVol"], ascending=False)
+        .sort_values(["Score"], ascending=False)
         .reset_index(drop=True)
     )
     scan_df["EarningsDate"] = scan_df["Ticker"].apply(get_next_earnings_date_str)
@@ -946,12 +677,12 @@ def main() -> None:
 
 
 
-    # BUY LIST + CONFIRM TABLE
+    # BUY LIST
     if confirm_rows:
         cdf = pd.DataFrame(confirm_rows)
 
         buy_df = cdf[cdf["Verdict"] == "BUY"].copy()
-        buy_df = buy_df.sort_values(["Score", "IntradayScore", "RegimeScore"], ascending=False).head(PRINT_BUY_LIST_TOP_N)
+        buy_df = buy_df.sort_values(["Score"], ascending=False).head(PRINT_BUY_LIST_TOP_N)
 
         print("\n" + "=" * 90)
         print(f"BUY LIST (top {PRINT_BUY_LIST_TOP_N}) — buy close / sell next day")
@@ -959,19 +690,7 @@ def main() -> None:
         if buy_df.empty:
             print("No BUY candidates today (based on thresholds).")
         else:
-            print(buy_df[["Ticker", "BarDate", "Score", "DayRetPct", "IntradayScore", "RegimeScore", "Plan"]].to_string(index=False))
-
-        if PRINT_CONFIRM_TABLE:
-            print("\n" + "=" * 90)
-            print("CONFIRMATION TABLE (full)")
-            print("=" * 90)
-            print(cdf.sort_values(["Verdict", "Score", "IntradayScore"], ascending=[True, False, False]).to_string(index=False))
-
-        if USE_REGIME_CONFIRM:
-            print("\nREGIME DETAILS:")
-            print(f"  RegimeOK   : {regime['ok']}")
-            print(f"  RegimeScore: {regime['score']:.1f}")
-            print(f"  Reason     : {regime['reason']}")
+            print(buy_df[["Ticker", "BarDate", "Score", "DayRetPct", "Plan"]].to_string(index=False))
 
         print("\nHistory Table Exclude Rules")
         print("1) Net (Gain - Loss) < 1.5%")
@@ -1002,9 +721,6 @@ def main() -> None:
                 qqq_nextday_open_pct,
                 end_date,
                 single_date_input,
-                float(regime["score"]),
-                USE_REGIME_CONFIRM,
-                USE_INTRADAY_60M_CONFIRM,
                 min_day_thresh=2.0,
                 big_day_thresh=6.0,
             )
