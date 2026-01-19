@@ -34,6 +34,14 @@ EARNINGS_EXCLUDE_DAYS = 5   # change this anytime (5 = next 5 days, 0 = today on
 
 
 # =============================
+# ADDED: "First run of the day" skip list settings (NO DATE INPUT ONLY)
+# =============================
+FIRST_RUN_SKIP_MIN_DAYRET = 1.0  # if DayRetPct < +1% on first run, ignore that ticker all day (only when date input is blank)
+FIRST_RUN_SKIP_FILE_PREFIX = "skip_under1p_"  # file name: skip_under1p_YYYY-MM-DD.txt
+FIRST_RUN_SKIP_DIR = "daily_skips"  # folder to store daily skip flat files
+
+
+# =============================
 # BASIC HELPERS
 # =============================
 def parse_tickers(s: str) -> List[str]:
@@ -546,7 +554,7 @@ def print_history_output(
 # MAIN: Scan table + History output ONLY for scan table tickers
 # =============================
 def main() -> None:
-    tickers_raw = "A,AA,AAL,AAOI,AAON,AAPL,ABBV,ACN,ADI,AEE,AEP,AER,AFL,AI,AIG,AKAM,ALK,ALLY,ALNY,AMAT,AMD,AMGN,AMP,AMT,ANF,AON,APG,APH,APLD,APO,APP,ARRY,ARW,ASTS,ATI,ATXS,AVAV,AVGO,AVT,AVY,AXP,AXTI,AZO,BA,BAC,BAH,BBY,BDX,BG,BIIB,BILL,BKNG,BLK,BMRN,BROS,BWA,C,CAH,CAMT,CARR,CAT,CB,CCL,CDNS,CF,CG,CHRW,CI,CIEN,CL,CLS,CLSK,CMA,CMI,COF,COHR,COIN,COR,CORT,COST,CPT,CRDO,CRL,CRS,CSCO,CSX,CTSH,CVS,CVX,CWAN,DAL,DASH,DBX,DELL,DHR,DKNG,DKS,DLR,DOCU,DT,DUOL,ECL,ED,EL,ELAN,ELF,ELV,EMR,EOG,EPAM,EQIX,ESTC,ETR,EXAS,EXE,EXPE,FANG,FCEL,FCX,FDS,FICO,FIG,FIS,FIVE,FIX,FLEX,FLNC,FLS,FLYW,FN,FNV,FOXA,FROG,FSLR,GE,GILD,GLW,GM,GOOG,GOOGL,GPC,GS,GTLB,HAL,HALO,HCA,HIG,HLT,HON,HOOD,HPE,HUM,HWM,IBKR,ICE,ILMN,INSM,INSP,INTC,INTU,IONQ,IONS,IOT,IQV,IR,IRM,ISRG,IT,IVZ,J,JBHT,JBL,JCI,JKHY,JPM,KEYS,KKR,KLAC,KRMN,KTOS,KVYO,LC,LDOS,LEU,LITE,LLY,LMT,LOW,LPLA,LRCX,LSCC,LUV,LXEO,LYFT,MA,MAA,MBLY,MCD,MCHP,MDB,MDT,META,MIDD,MIR,MKSI,MMM,MNDY,MORN,MP,MPWR,MRK,MS,MSCI,MSFT,MTB,MTN,MTSI,MTZ,MU,NBIS,NBIX,NDAQ,NEE,NEM,NET,NKE,NOC,NTNX,NTRA,NTRS,NUE,NVDA,NVT,NVTS,NXPI,NXT,OKLO,OKTA,OMC,ON,ONDS,ONTO,ORCL,OXY,PAAS,PATH,PAY,PBF,PCAR,PEGA,PEP,PFE,PG,PLD,PLNT,PLTR,PM,PNFP,PSTG,PSX,QBTS,RBLX,RDDT,RGLD,RIVN,RJF,RNG,ROK,ROKU,ROST,RTX,RUN,SATS,SBUX,SCHW,SEI,SFM,SGI,SLB,SMCI,SN,SNAP,SNDK,SNX,SRE,STE,STLD,STRL,STT,STX,SYK,SYNA,TEAM,TECH,TEL,TER,TJX,TMO,TROW,TSLA,TTD,TVTX,TXRH,U,UAL,UBER,UHS,ULTA,UNH,UPS,USAR,UUUU,V,VRT,VSH,VTRS,VTYX,W,WBD,WDC,WFC,WING,WMT,WRBY,WSM,WST,WYNN,XOM,ZM,ZS,ZTS,SKY,VSAT,AMZN,BKKT,HL,SEDG,LMND,CIFR,MGNI,MNTS,PL,RKLB,LUNR,FLY,RDW,MOS,FMC,JOBY,VFC,CRI,GAP,LULU,AEO,VSCO,URBN,OWL,CWH,CVNA,KMX,LCID,MOD,QS,AEVA,NPB,CELH,STZ,RIOT,WULF,MARA,HUT,FIGR,CE,HUN,METC,COMM,VIAV,UMAC,ANET,HPQ,OSS,QUBT,RGTI,RCAT,SOFI,UPST,M,KSS,GH,TGT,DLTR,SERV,SMR,PRGO,PCRX,AMPX,EOSE,TTMI,BE,OUST,LPTH,FLR,TIC,DECK,BIRK,SBET,SGHC,OSCR,DOCS,TEM,TXG,HIMS,PPTA,TWLO,GENI,SPOT,STUB,Z,DJT,TRIP,MODG,FUN,NCLH,REAL,CNK,PSKY,VSNT,ACHC,BRKR,RXST,TNDM,BBNX,ATEC,SOC,APA,RRC,OVV,MUR,CRK,AR,SM,LBRT,HLF,LW,BRBR,PCT,CSGP,DBRG,TWO,FRMI,COLD,HPP,CZR,PENN,CAVA,GEO,ENTG,ACMR,AEHR,AMKR,Q,ALAB,MRVL,AG,GTM,FRSH,COMP,PD,DDOG,SNOW,BTDR,MSTR,NOW,ASAN,SOUN,OS,RELY,CRWV,CORZ,RBRK,NTSK,FOUR,SOLS,KLAR,PGY,AFRM,ENPH,AVTR,ALB,CC,OLN,ETSY,CART,CHWY,BBWI,GME,RHI,UPWK,CLF,CMCSA,RXO,VST,GEV,NRG,CEG,HE,CSIQ,MRNA,XBI,CRWD"
+    tickers_raw = "A,AA,AAL,AAOI,AAON,AAPL,ABBV,ACN,ADI,AEE,AEP,AER,AFL,AI,AIG,AKAM,ALK,ALLY,ALNY,AMAT,AMD,AMGN,AMP,AMT,ANF,AON,APG,APH,APLD,APO,APP,ARRY,ARW,ASTS,ATI,ATXS,AVAV,AVGO,AVT,AVY,AXP,AXTI,AZO,BA,BAC,BAH,BBY,BDX,BG,BIIB,BILL,BKNG,BLK,BMRN,BROS,BWA,C,CAH,CAMT,CARR,CAT,CB,CCL,CDNS,CF,CG,CHRW,CI,CIEN,CL,CLS,CLSK,CMA,CMI,COF,COHR,COIN,COR,CORT,COST,CPT,CRDO,CRL,CRS,CSCO,CSX,CTSH,CVX,CWAN,DAL,DASH,DBX,DELL,DHR,DKNG,DKS,DLR,DOCU,DT,DUOL,ECL,ED,EL,ELAN,ELF,ELV,EMR,EOG,EPAM,EQIX,ESTC,ETR,EXAS,EXE,EXPE,FANG,FCEL,FCX,FDS,FICO,FIG,FIS,FIVE,FIX,FLEX,FLNC,FLS,FLYW,FN,FNV,FOXA,FROG,FSLR,GE,GILD,GLW,GM,GOOG,GOOGL,GPC,GS,GTLB,HAL,HALO,HCA,HIG,HLT,HON,HOOD,HPE,HUM,HWM,IBKR,ICE,ILMN,INSM,INSP,INTC,INTU,IONQ,IONS,IOT,IQV,IR,IRM,ISRG,IT,IVZ,J,JBHT,JBL,JCI,JKHY,JPM,KEYS,KKR,KLAC,KRMN,KTOS,KVYO,LC,LDOS,LEU,LITE,LLY,LMT,LOW,LPLA,LRCX,LSCC,LUV,LXEO,LYFT,MA,MAA,MBLY,MCD,MCHP,MDB,MDT,META,MIDD,MIR,MKSI,MMM,MNDY,MORN,MP,MPWR,MRK,MS,MSCI,MSFT,MTB,MTN,MTSI,MTZ,MU,NBIS,NBIX,NDAQ,NEE,NEM,NET,NKE,NOC,NTNX,NTRA,NTRS,NUE,NVDA,NVT,NVTS,NXPI,NXT,OKLO,OKTA,OMC,ON,ONDS,ONTO,ORCL,OXY,PAAS,PATH,PAY,PBF,PCAR,PEGA,PEP,PFE,PG,PLD,PLNT,PLTR,PM,PNFP,PSTG,PSX,QBTS,RBLX,RDDT,RGLD,RIVN,RJF,RNG,ROK,ROKU,ROST,RTX,RUN,SATS,SBUX,SCHW,SEI,SFM,SGI,SLB,SMCI,SN,SNAP,SNDK,SNX,SRE,STE,STLD,STRL,STT,STX,SYK,SYNA,TEAM,TEL,TER,TJX,TMO,TROW,TSLA,TTD,TVTX,TXRH,U,UAL,UBER,UHS,ULTA,UNH,UPS,USAR,UUUU,V,VRT,VSH,VTRS,VTYX,W,WBD,WDC,WFC,WING,WMT,WRBY,WSM,WST,WYNN,XOM,ZM,ZS,ZTS,SKY,VSAT,AMZN,BKKT,HL,SEDG,LMND,CIFR,MGNI,MNTS,PL,RKLB,LUNR,FLY,RDW,MOS,FMC,JOBY,VFC,CRI,GAP,LULU,AEO,VSCO,URBN,OWL,CWH,CVNA,KMX,LCID,MOD,QS,AEVA,NPB,CELH,STZ,RIOT,WULF,MARA,HUT,FIGR,CE,HUN,METC,COMM,VIAV,UMAC,ANET,HPQ,OSS,QUBT,RGTI,RCAT,SOFI,UPST,M,KSS,GH,TGT,DLTR,SERV,SMR,PRGO,PCRX,AMPX,EOSE,TTMI,BE,OUST,LPTH,FLR,TIC,DECK,BIRK,SBET,SGHC,OSCR,DOCS,TEM,TXG,HIMS,PPTA,TWLO,GENI,SPOT,STUB,Z,DJT,TRIP,MODG,FUN,NCLH,REAL,CNK,PSKY,VSNT,ACHC,BRKR,RXST,TNDM,BBNX,ATEC,SOC,APA,RRC,OVV,MUR,CRK,AR,SM,LBRT,HLF,LW,BRBR,PCT,CSGP,DBRG,TWO,FRMI,COLD,HPP,PENN,CAVA,GEO,ENTG,ACMR,AEHR,AMKR,Q,ALAB,MRVL,AG,GTM,FRSH,COMP,PD,DDOG,SNOW,BTDR,MSTR,NOW,ASAN,SOUN,OS,RELY,CRWV,CORZ,RBRK,NTSK,FOUR,SOLS,KLAR,PGY,AFRM,ENPH,AVTR,ALB,CC,OLN,ETSY,CART,CHWY,BBWI,GME,RHI,UPWK,CLF,CMCSA,RXO,VST,GEV,NRG,CEG,HE,CSIQ,MRNA,XBI,CRWD,RZLV,LAES,NUAI,LUMN,ASPI,POET,IMRX,ALT,SHLS,HTZ,TIGR,ACHR,VG,ABR,USAS,PAYO,SANA,DRIP,ULCC,NIO,JBLU,INDI,SG,TSLG,BBAI,ASM,TROX,VZLA,NWL,MSOS,MNKD,BCRX,BW,BTG,COUR,SLDP,BULL,CRMD,AUR,RIG,PLTD,PTEN,TSLS,TLRY,NUVB,FSLY,DUST,TDOC,TSHA,MQ,CRGY,TSDD,ENVX,GDXD,NVAX,TMQ,TGB,UNIT,HIMZ,RXRX,LAR,UAA,ABCL,UA,FNGD,NEXT,SLI,TE,OPEN,MSTX,MUD,TZA,BORR,BMNG,BMNU,UAMY,TMC,LAC,BFLY,PGEN,NVD,GRAB,AMDD,NB,XRPT,SOLT,UVIX,CRCA,ABAT,TSM"
     
     exclude_raw = input("Exclude tickers (optional, comma-separated): ").strip()
     date_raw = input("Enter Date YYYY-MM-DD (default ): ").strip()
@@ -564,6 +572,38 @@ def main() -> None:
 
     end_date = roll_end_date(date_raw if date_raw else None)
 
+    # =============================
+    # ADDED: load today's skip file ONLY when date input is blank
+    # =============================
+    skip_file_path = None
+    is_first_run_today = False
+    skip_today_set: set[str] = set()
+    if not single_date_input:
+        try:
+            os.makedirs(FIRST_RUN_SKIP_DIR, exist_ok=True)
+        except Exception:
+            pass
+
+        today_str = pd.to_datetime(end_date).strftime("%Y-%m-%d")
+        skip_file_path = os.path.join(FIRST_RUN_SKIP_DIR, f"{FIRST_RUN_SKIP_FILE_PREFIX}{today_str}.txt")
+        is_first_run_today = not os.path.exists(skip_file_path)
+        if os.path.exists(skip_file_path):
+            try:
+                with open(skip_file_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        t = line.strip().upper().replace(".", "-")
+                        if t:
+                            skip_today_set.add(t)
+            except Exception:
+                skip_today_set = set()
+
+        if skip_today_set:
+            tickers = [t for t in tickers if t not in skip_today_set]
+
+        if not tickers:
+            raise SystemExit("❌ No tickers left after exclusions + today skip file.")
+    # =============================
+
     MIN_SCORE = 60
     MIN_DOLLARVOL = 50_000_000
 
@@ -579,6 +619,12 @@ def main() -> None:
     feats_map: Dict[str, pd.DataFrame] = {}
     confirm_rows: list[dict] = []
 
+    # =============================
+    # ADDED: collect new skips during first run (NO DATE INPUT ONLY)
+    # =============================
+    newly_skipped_today: set[str] = set()
+    # =============================
+
     for t in tickers:
         df = hist_map.get(t)
         if df is None or len(df) < 80:
@@ -592,6 +638,18 @@ def main() -> None:
         if len(bar_date) == 0:
             continue
         bar_date = bar_date[-1]
+
+        # =============================
+        # ADDED: first run skip rule (NO DATE INPUT ONLY)
+        # If DayRetPct < +1% on first run, do not consider this stock again today.
+        # =============================
+        if not single_date_input and is_first_run_today:
+            _i_tmp = int(feats.index.get_loc(bar_date))
+            _dayret_tmp = safe(feats.iloc[_i_tmp].get("DayRetPct", np.nan))
+            if np.isfinite(_dayret_tmp) and _dayret_tmp < FIRST_RUN_SKIP_MIN_DAYRET:
+                newly_skipped_today.add(t)
+                continue
+        # =============================
 
         i = int(feats.index.get_loc(bar_date))
         base = footprint_score(feats.iloc[i])
@@ -636,6 +694,39 @@ def main() -> None:
             "Verdict": verdict,
             "Plan": "BUY signal close / sell next day"
         })
+
+    # =============================
+    # ADDED: write today's skip file at end of first run (NO DATE INPUT ONLY)
+    # =============================
+    if not single_date_input and is_first_run_today and skip_file_path:
+        if newly_skipped_today:
+            try:
+                # write one ticker per line
+                tmp_path = skip_file_path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    for t in sorted(newly_skipped_today):
+                        f.write(t + "\n")
+                try:
+                    os.replace(tmp_path, skip_file_path)
+                except Exception:
+                    # fallback if replace fails
+                    with open(skip_file_path, "w", encoding="utf-8") as f:
+                        for t in sorted(newly_skipped_today):
+                            f.write(t + "\n")
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        else:
+            # create empty file so later runs know first-run is already done
+            try:
+                with open(skip_file_path, "w", encoding="utf-8") as f:
+                    f.write("")
+            except Exception:
+                pass
+    # =============================
 
     if not scan_rows:
         print("No matches found.")
@@ -706,8 +797,9 @@ def main() -> None:
         print("1. Only Min 2% to Max 6% up on Signal Day (example 1%up, but gap down and solid came back still dont do)")
         print("2. Avoid Consecutive days Or often like repeated in 1 or 2 days")
         print("3. if open minus next Day Sell immediately")
-        print("4. avoid If signal Day is ready for break out (except small candle rules).")
-        print("5. avoid down day with Signal Days and less than 1% except same candle type of previous day (wait for next Day)")
+        print("4. avoid If signal Day is ready for break out (except 3rd or 4th time).")
+        print("5. avoid down day or reversal next single day like parrlel candle")
+        print("6. avoid down day with Signal Days and less than 1% except same candle type of previous day (wait for next Day)")
 
         # History only for tickers in scan table (but print only if Net > 2, per print_history_output gate)
         for t in scan_df["Ticker"].tolist():
