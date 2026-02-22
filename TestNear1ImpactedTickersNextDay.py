@@ -20,18 +20,20 @@ pd.set_option("display.colheader_justify", "center")
 
 
 # =============================
-# BUY LIST SETTINGS (kept: used for Verdict logic if you re-add it later)
+# BUY LIST SETTINGS
 # =============================
 BUY_MIN_SCORE = 70.0
 MAX_DAYRET_FOR_BUY = 6.0
-PRINT_BUY_LIST_TOP_N = 5  # currently unused after cleanup, safe to keep or remove
+PRINT_BUY_LIST_TOP_N = 5
 MIN_SIGNAL_DAY_PCT = 2.5
-
-
+NEXTDAY_MIN_UP_PCT = 1.0      # minimum positive next-day move
+NEXTDAY_MIN_DOWN_PCT = -0.0   # maximum negative next-day move
 # =============================
 # EARNINGS FILTER SETTINGS
 # =============================
-EARNINGS_EXCLUDE_DAYS = 5   # (5 = next 5 days, 0 = today only, -1 = disable)
+# NOTE: Your column "LatestEarningsDate" is now the most recent earnings date already happened (<= BarDate).
+# The old "exclude upcoming earnings in next N days" logic no longer applies, so keep this disabled.
+EARNINGS_EXCLUDE_DAYS = -1   # (kept for compatibility; -1 = disable)
 
 # =============================
 # "First run of the day" skip list settings (NO DATE INPUT ONLY)
@@ -39,6 +41,17 @@ EARNINGS_EXCLUDE_DAYS = 5   # (5 = next 5 days, 0 = today only, -1 = disable)
 FIRST_RUN_SKIP_MIN_DAYRET = 1.0
 FIRST_RUN_SKIP_FILE_PREFIX = "skip_under1p_"
 FIRST_RUN_SKIP_DIR = "daily_skips"
+
+# =============================
+# NEAR (PRE-SIGNAL) SETTINGS
+# =============================
+NEAR_MIN_SCORE = 50.0  # show tickers that are close but below MIN_SCORE
+
+
+# =============================
+# ✅ NEW: EXCLUDE ROWS IF EARNINGS DATE IS SAME DAY OR NEXT TRADING DAY
+# =============================
+EXCLUDE_IF_EARNINGS_ON_BAR_OR_NEXT_TRADING_DAY = True
 
 
 # =============================
@@ -102,43 +115,150 @@ def _extract_ohlcv(hist: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
     return df[cols].dropna()
 
 
-# =============================
-# EARNINGS DATE (NEXT) - cached
-# =============================
-_EARNINGS_CACHE: dict[str, str] = {}
+def _pct_str_to_float(v):
+    if isinstance(v, str):
+        v = v.strip().replace("%", "")
+        return float(v) if v else np.nan
+    try:
+        return float(v)
+    except Exception:
+        return np.nan
 
 
-def get_next_earnings_date_str(ticker: str) -> str:
+# =============================
+# ✅ NEW: EARNINGS DATE FILTER (same day or next trading day)
+# =============================
+def should_exclude_row_due_to_earnings(bar_date: pd.Timestamp, latest_earn_str: str) -> bool:
     """
-    Returns next earnings date as 'YYYY-MM-DD' (or '' if unavailable).
-    Uses yfinance get_earnings_dates(limit=1).
+    True => exclude row when:
+      1) LatestEarningsDate == BarDate (same day)
+      2) LatestEarningsDate == next trading day after BarDate
+    """
+    if not latest_earn_str:
+        return False
+
+    try:
+        earn_date = pd.to_datetime(latest_earn_str).normalize()
+    except Exception:
+        return False
+
+    bar = pd.to_datetime(bar_date).normalize()
+    next_trading = (bar + BDay(1)).normalize()
+
+    return earn_date == bar or earn_date == next_trading
+
+
+# =============================
+# ✅ LATEST EARNINGS DATE ON/BEFORE A GIVEN DATE - cached
+# =============================
+_EARNINGS_LATEST_CACHE: dict[str, str] = {}
+
+
+def get_latest_earnings_on_or_before_date_str(ticker: str, ref_date: pd.Timestamp) -> str:
+    """
+    Returns earnings date ON OR BEFORE ref_date as 'YYYY-MM-DD' (or '' if unavailable).
+    Uses yfinance get_earnings_dates(limit=12) and picks max date <= ref_date.
     Cached to avoid repeated calls.
     """
     t = ticker.upper().replace(".", "-").strip()
     if not t:
         return ""
 
-    if t in _EARNINGS_CACHE:
-        return _EARNINGS_CACHE[t]
+    ref = pd.to_datetime(ref_date).normalize()
+    cache_key = f"{t}|{ref.strftime('%Y-%m-%d')}"
+    if cache_key in _EARNINGS_LATEST_CACHE:
+        return _EARNINGS_LATEST_CACHE[cache_key]
 
     try:
-        edf = yf.Ticker(t).get_earnings_dates(limit=1)
+        edf = yf.Ticker(t).get_earnings_dates(limit=12)
         if edf is None or edf.empty:
-            _EARNINGS_CACHE[t] = ""
+            _EARNINGS_LATEST_CACHE[cache_key] = ""
             return ""
 
-        dt = pd.to_datetime(edf.index[0])
-        out = dt.strftime("%Y-%m-%d")
-        _EARNINGS_CACHE[t] = out
+        idx = pd.to_datetime(edf.index)
+
+        # drop tz info if present
+        try:
+            idx = idx.tz_localize(None)
+        except Exception:
+            pass
+
+        idx = pd.Series(idx).dropna().dt.normalize()
+        past = idx[idx <= ref]
+        if past.empty:
+            _EARNINGS_LATEST_CACHE[cache_key] = ""
+            return ""
+
+        out = pd.to_datetime(past.max()).strftime("%Y-%m-%d")
+        _EARNINGS_LATEST_CACHE[cache_key] = out
         return out
     except Exception:
-        _EARNINGS_CACHE[t] = ""
+        _EARNINGS_LATEST_CACHE[cache_key] = ""
         return ""
+
+
+# =============================
+# ✅ SAME NET CALC, BUT FOR ANY SUBSET (NO LOGIC CHANGE)
+# =============================
+def _net_stats(df: pd.DataFrame) -> dict:
+    """Returns Gain/Loss/Net using EXACT same rules as your current Net calc."""
+    if df is None or df.empty:
+        return {"gain": 0.0, "loss": 0.0, "net": 0.0}
+
+    gain = float(
+        np.where(
+            (df["NextDayOpen%_num"] > 0) & (df["NextDayLow%_num"] < -1),
+            -1.0,
+            np.where(
+                (df["NextDayOpen%_num"] > 0),
+                df["NextDay%_num"],
+                0.0
+            )
+        ).sum()
+    )
+
+    loss = float(
+        df.loc[df["NextDayOpen%_num"] < 0, "NextDayOpen%_num"].sum(skipna=True)
+    )
+
+    net = gain - abs(loss)
+    return {"gain": gain, "loss": loss, "net": net}
 
 
 # =============================
 # DOWNLOAD (DAILY)
 # =============================
+def download_history(ticker: str, end_date: pd.Timestamp) -> pd.DataFrame:
+    hist = None
+    for attempt in range(3):
+        try:
+            hist = yf.download(
+                ticker,
+                period="1y",
+                interval="1d",
+                progress=False,
+                auto_adjust=False,
+                group_by="ticker",
+                threads=True,
+            )
+            break
+        except Exception:
+            time.sleep(0.6 * (2 ** attempt))
+
+    df = _extract_ohlcv(hist, ticker)
+    if df is None or df.empty:
+        raise SystemExit(f"❌ No data returned for {ticker}")
+
+    df.index = pd.to_datetime(df.index)
+
+    end_plus = end_date_plus_one_trading_day(end_date)
+    df = df.loc[df.index <= end_plus]
+
+    if df.empty:
+        raise SystemExit(f"❌ {ticker} has no rows after end_date filter.")
+    return df
+
+
 def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
     hist = None
     for attempt in range(3):
@@ -302,7 +422,7 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
 
 
 # =============================
-# PRINT HELPER (kept: used)
+# PRINT HELPER
 # =============================
 def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Timestamp):
     if scan_df.empty:
@@ -310,21 +430,18 @@ def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Times
         return
 
     today = pd.to_datetime(end_date).normalize()
-    tomorrow = (today + BDay(1)).normalize()  # next trading day
+    tomorrow = (today + BDay(1)).normalize()
     red_set = {today.strftime("%Y-%m-%d"), tomorrow.strftime("%Y-%m-%d")}
 
-    # normal table string
     table = scan_df.to_string(index=False)
     lines = table.splitlines()
 
-    # header is lines[0], separator is lines[1]
     print(lines[0])
     if len(lines) > 1:
         print(lines[1])
 
-    # find the EarningsDate column location from header
     header = lines[0]
-    col_name = "EarningsDate"
+    col_name = "LatestEarningsDate"
     start = header.find(col_name)
 
     for line in lines[2:]:
@@ -334,7 +451,7 @@ def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Times
             is_red = (earnings_text in red_set)
 
         if is_red:
-            print(f"\033[91m{line}\033[0m")  # red
+            print(f"\033[91m{line}\033[0m")
         else:
             print(line)
 
@@ -343,10 +460,11 @@ def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Times
 # MAIN
 # =============================
 def main() -> None:
-    tickers_raw = "A,AA,AAL,AAOI,AAON,AAPL,ABBV,ADI,AEE,AEP,AER,AFL,AI,AIG,AKAM,ALK,ALLY,ALNY,AMAT,AMD,AMGN,AMP,AMT,ANF,AON,APG,APH,APLD,APO,APP,ARRY,ARW,ASTS,ATI,ATXS,AVAV,AVGO,AVT,AVY,AXP,AXTI,AZO,BA,BAC,BAH,BBY,BDX,BG,BIIB,BILL,BKNG,BLK,BMRN,BROS,BWA,C,CAH,CAMT,CARR,CAT,CB,CCL,CDNS,CF,CG,CHRW,CI,CIEN,CL,CLS,CLSK,CMA,CMI,COF,COHR,COIN,COR,CORT,COST,CPT,CRDO,CRL,CRS,CSCO,CSX,CTSH,CVX,CWAN,DAL,DASH,DBX,DELL,DHR,DKNG,DKS,DLR,DOCU,DT,DUOL,ECL,ED,EL,ELAN,ELF,ELV,EMR,EOG,EPAM,EQIX,ESTC,ETR,EXAS,EXE,EXPE,FANG,FCEL,FCX,FDS,FICO,FIG,FIS,FIVE,FIX,FLEX,FLNC,FLS,FLYW,FN,FNV,FOXA,FROG,FSLR,GE,GILD,GLW,GM,GOOG,GOOGL,GS,GTLB,HAL,HALO,HCA,HIG,HLT,HON,HOOD,HUM,HWM,IBKR,ICE,ILMN,INSM,INSP,INTC,INTU,IONQ,IONS,IOT,IQV,IR,IRM,ISRG,IT,IVZ,J,JBHT,JBL,JCI,JKHY,JPM,KEYS,KKR,KLAC,KRMN,KTOS,KVYO,LC,LDOS,LEU,LITE,LLY,LMT,LOW,LPLA,LRCX,LSCC,LUV,LXEO,LYFT,MA,MAA,MBLY,MCD,MCHP,MDB,MDT,META,MIDD,MIR,MKSI,MMM,MNDY,MORN,MP,MPWR,MRK,MS,MSCI,MSFT,MTB,MTN,MTSI,MTZ,MU,NBIS,NBIX,NDAQ,NEE,NEM,NET,NKE,NOC,NTNX,NTRA,NTRS,NUE,NVDA,NVT,NVTS,NXPI,NXT,OKLO,OKTA,OMC,ON,ONDS,ONTO,ORCL,OXY,PAAS,PATH,PAY,PBF,PCAR,PEGA,PEP,PFE,PG,PLD,PLNT,PLTR,PM,PNFP,PSTG,PSX,QBTS,RBLX,RDDT,RGLD,RIVN,RJF,RNG,ROK,ROKU,ROST,RTX,RUN,SATS,SBUX,SCHW,SEI,SFM,SGI,SLB,SMCI,SN,SNAP,SNDK,SNX,SRE,STE,STLD,STRL,STT,STX,SYK,SYNA,TEAM,TEL,TER,TJX,TMO,TROW,TSLA,TTD,TVTX,TXRH,U,UAL,UBER,UHS,ULTA,UNH,UPS,USAR,UUUU,V,VRT,VSH,VTRS,VTYX,W,WBD,WDC,WFC,WING,WMT,WRBY,WSM,WST,WYNN,XOM,ZM,ZS,ZTS,SKY,VSAT,AMZN,BKKT,HL,SEDG,LMND,CIFR,MGNI,MNTS,PL,RKLB,LUNR,FLY,RDW,MOS,FMC,JOBY,VFC,CRI,GAP,LULU,AEO,VSCO,URBN,OWL,CWH,CVNA,KMX,LCID,MOD,QS,AEVA,NPB,CELH,STZ,RIOT,WULF,MARA,HUT,FIGR,CE,HUN,METC,COMM,VIAV,UMAC,ANET,HPQ,OSS,QUBT,RGTI,RCAT,SOFI,UPST,M,KSS,GH,TGT,DLTR,SERV,SMR,PRGO,PCRX,AMPX,EOSE,TTMI,BE,OUST,LPTH,FLR,TIC,DECK,BIRK,SBET,SGHC,OSCR,DOCS,TEM,TXG,HIMS,PPTA,TWLO,GENI,SPOT,STUB,Z,DJT,TRIP,MODG,FUN,NCLH,REAL,CNK,PSKY,VSNT,ACHC,BRKR,RXST,TNDM,BBNX,ATEC,SOC,APA,RRC,OVV,MUR,CRK,AR,SM,LBRT,HLF,LW,BRBR,PCT,CSGP,DBRG,TWO,FRMI,COLD,HPP,PENN,CAVA,GEO,ENTG,ACMR,AEHR,AMKR,Q,ALAB,MRVL,AG,GTM,FRSH,COMP,PD,DDOG,SNOW,BTDR,MSTR,NOW,ASAN,SOUN,OS,RELY,CRWV,CORZ,RBRK,NTSK,FOUR,SOLS,KLAR,PGY,AFRM,ENPH,AVTR,ALB,CC,OLN,ETSY,CART,CHWY,BBWI,GME,RHI,UPWK,CLF,CMCSA,RXO,VST,GEV,NRG,CEG,HE,CSIQ,MRNA,XBI,CRWD,RZLV,LAES,NUAI,LUMN,ASPI,POET,IMRX,ALT,SHLS,HTZ,TIGR,ACHR,VG,ABR,USAS,PAYO,SANA,DRIP,ULCC,NIO,JBLU,INDI,SG,BBAI,ASM,TROX,VZLA,NWL,MSOS,MNKD,BCRX,BW,BTG,COUR,SLDP,BULL,CRMD,AUR,RIG,PTEN,TLRY,NUVB,FSLY,DUST,TDOC,TSHA,MQ,CRGY,TSDD,ENVX,GDXD,NVAX,TMQ,TGB,UNIT,HIMZ,RXRX,LAR,UAA,ABCL,UA,NEXT,SLI,TE,OPEN,MSTX,MUD,TZA,BORR,BMNG,BMNU,UAMY,TMC,LAC,BFLY,PGEN,NVD,GRAB,AMDD,NB,XRPT,SOLT,CRCA,ABAT,TSM,,EXK,RKT,IREN,SHOP,TECK,UEC,PAGS,BMNR,NXE,NU,GFS,ZIM,ZETA,STNE,EBAY,CVE,QXO,XP,AES,VISN,FLG,BN,WT,BZ,LYB,AS,ABNB,CNQ,TXN,DD,NOV,SU,ALM,DXCM,CALY,BKR,SW,DHI,SYF,PINS,CRM,CNH,IBM,PYPL,CRBG,CNC,S,CMG,VLO,WY,FTV,QCOM,BX,TSCO,CCI,PGR,PRMB,MGY,SWKS,TOST,FAST,NEOG,CVS,JBS,PK,ACI,PANW,HOG,PR,ONON,ADBE,WDAY,ADM,DOC,DVN,GPK,HRL,CPRT,HD,OKE,AMCR,MKC,CPNG,HBAN,DG,AMH,COP,DOW,INVH,SIRI,XRAY,BAX,KR,EQT,CTRA,FLO,IP,CPB,CAG"
+    tickers_raw = "A,AA,AAL,AAOI,AAON,AAPL,ABBV,ADI,AEE,AEP,AER,AFL,AI,AIG,AKAM,ALK,ALLY,ALNY,AMAT,AMD,AMGN,AMP,AMT,ANF,AON,APG,APH,APLD,APO,APP,ARRY,ARW,ASTS,ATI,ATXS,AVAV,AVGO,AVT,AVY,AXP,AXTI,AZO,BA,BAC,BAH,BBY,BDX,BG,BIIB,BILL,BKNG,BLK,BMRN,BROS,BWA,C,CAH,CAMT,CARR,CAT,CB,CCL,CDNS,CF,CG,CHRW,CI,CIEN,CL,CLS,CLSK,CMA,CMI,COF,COHR,COIN,COR,CORT,COST,CPT,CRDO,CRL,CRS,CSCO,CSX,CTSH,CVX,CWAN,DAL,DASH,DBX,DELL,DHR,DKNG,DKS,DLR,DOCU,DT,DUOL,ECL,ED,EL,ELAN,ELF,ELV,EMR,EOG,EPAM,EQIX,ESTC,ETR,EXAS,EXE,EXPE,FANG,FCEL,FCX,FDS,FICO,FIG,FIS,FIVE,FIX,FLEX,FLNC,FLS,FLYW,FN,FNV,FOXA,FROG,FSLR,GE,GILD,GLW,GM,GOOG,GOOGL,GS,GTLB,HAL,HALO,HCA,HIG,HLT,HON,HOOD,HUM,HWM,IBKR,ICE,ILMN,INSM,INSP,INTC,INTU,IONQ,IONS,IOT,IQV,IR,IRM,ISRG,IT,IVZ,J,JBHT,JBL,JCI,JKHY,JPM,KEYS,KKR,KLAC,KRMN,KTOS,KVYO,LC,LDOS,LEU,LITE,LLY,LMT,LOW,LPLA,LRCX,LSCC,LUV,LXEO,LYFT,MA,MAA,MBLY,MCD,MCHP,MDB,MDT,META,MIDD,MIR,MKSI,MMM,MNDY,MORN,MP,MPWR,MRK,MS,MSCI,MSFT,MTB,MTN,MTSI,MTZ,MU,NBIS,NBIX,NDAQ,NEE,NEM,NET,NKE,NOC,NTNX,NTRA,NTRS,NUE,NVDA,NVT,NVTS,NXPI,NXT,OKLO,OKTA,OMC,ON,ONDS,ONTO,ORCL,OXY,PAAS,PATH,PAY,PBF,PCAR,PEGA,PEP,PFE,PG,PLD,PLNT,PLTR,PM,PNFP,PSTG,PSX,QBTS,RBLX,RDDT,RGLD,RIVN,RJF,RNG,ROK,ROKU,ROST,RTX,RUN,SATS,SBUX,SCHW,SEI,SFM,SGI,SLB,SMCI,SN,SNAP,SNDK,SNX,SRE,STE,STLD,STRL,STT,STX,SYK,SYNA,TEAM,TEL,TER,TJX,TMO,TROW,TSLA,TTD,TVTX,TXRH,U,UAL,UBER,UHS,ULTA,UNH,UPS,USAR,UUUU,V,VRT,VSH,VTRS,VTYX,W,WBD,WDC,WFC,WING,WMT,WRBY,WSM,WST,WYNN,XOM,ZM,ZS,ZTS,SKY,VSAT,AMZN,BKKT,HL,SEDG,LMND,CIFR,MGNI,MNTS,PL,RKLB,LUNR,FLY,RDW,MOS,FMC,JOBY,VFC,CRI,GAP,LULU,AEO,VSCO,URBN,OWL,CWH,CVNA,KMX,LCID,MOD,QS,AEVA,NPB,CELH,STZ,RIOT,WULF,MARA,HUT,FIGR,CE,HUN,METC,COMM,VIAV,UMAC,ANET,HPQ,OSS,QUBT,RGTI,RCAT,SOFI,UPST,M,KSS,GH,TGT,DLTR,SERV,SMR,PRGO,PCRX,AMPX,EOSE,TTMI,BE,OUST,LPTH,FLR,TIC,DECK,BIRK,SBET,SGHC,OSCR,DOCS,TEM,TXG,HIMS,PPTA,TWLO,GENI,SPOT,STUB,Z,DJT,TRIP,MODG,FUN,NCLH,REAL,CNK,PSKY,VSNT,ACHC,BRKR,RXST,TNDM,BBNX,ATEC,SOC,APA,RRC,OVV,MUR,CRK,AR,SM,LBRT,HLF,LW,BRBR,PCT,CSGP,DBRG,TWO,FRMI,COLD,HPP,PENN,CAVA,GEO,ENTG,ACMR,AEHR,AMKR,Q,ALAB,MRVL,AG,GTM,FRSH,COMP,PD,DDOG,SNOW,BTDR,MSTR,NOW,ASAN,SOUN,OS,RELY,CRWV,CORZ,RBRK,NTSK,FOUR,SOLS,KLAR,PGY,AFRM,ENPH,AVTR,ALB,CC,OLN,ETSY,CART,CHWY,BBWI,GME,RHI,UPWK,CLF,CMCSA,RXO,VST,GEV,NRG,CEG,HE,CSIQ,MRNA,XBI,CRWD,RZLV,LAES,NUAI,LUMN,ASPI,POET,IMRX,ALT,SHLS,HTZ,TIGR,ACHR,VG,ABR,USAS,PAYO,SANA,DRIP,ULCC,NIO,JBLU,INDI,SG,BBAI,ASM,TROX,VZLA,NWL,MSOS,MNKD,BCRX,BW,BTG,COUR,SLDP,BULL,CRMD,AUR,RIG,PTEN,TLRY,NUVB,FSLY,DUST,TDOC,TSHA,MQ,CRGY,TSDD,ENVX,GDXD,NVAX,TMQ,TGB,UNIT,HIMZ,RXRX,LAR,UAA,ABCL,UA,NEXT,SLI,TE,OPEN,MSTX,MUD,TZA,BORR,BMNG,BMNU,UAMY,TMC,LAC,BFLY,PGEN,NVD,GRAB,AMDD,NB,XRPT,SOLT,CRCA,ABAT,TSM,EXK,RKT,IREN,SHOP,TECK,UEC,PAGS,BMNR,NXE,NU,GFS,ZIM,ZETA,STNE,EBAY,CVE,QXO,XP,AES,VISN,FLG,BN,WT,BZ,LYB,AS,ABNB,CNQ,TXN,DD,NOV,SU,ALM,DXCM,CALY,BKR,SW,DHI,SYF,PINS,CRM,CNH,IBM,PYPL,CRBG,CNC,S,CMG,VLO,WY,FTV,QCOM,BX,TSCO,CCI,PGR,PRMB,MGY,SWKS,TOST,FAST,NEOG,CVS,JBS,PK,ACI,PANW,HOG,PR,ONON,ADBE,WDAY,ADM,DOC,DVN,GPK,HRL,CPRT,HD,OKE,AMCR,MKC,CPNG,HBAN,DG,AMH,COP,DOW,INVH,SIRI,XRAY,BAX,KR,EQT,CTRA,FLO,IP,CPB,CAG"
 
     exclude_raw = input("Exclude tickers (optional, comma-separated): ").strip()
-    date_raw = input("Enter Date YYYY-MM-DD (default ): ").strip()
+    start_raw = input("StartDate YYYY-MM-DD (blank = same as EndDate): ").strip()
+    end_raw = input("EndDate   YYYY-MM-DD (blank = last trading day): ").strip()
 
     max_signal_raw = input("Max Signal Day % (default 8): ").strip()
     if max_signal_raw == "":
@@ -357,7 +475,7 @@ def main() -> None:
         except ValueError:
             raise SystemExit("❌ Invalid Max Signal Day % input.")
 
-    single_date_input = bool(date_raw)
+    daily_mode = (start_raw == "" and end_raw == "")
 
     os.system("cls" if os.name == "nt" else "clear")
 
@@ -368,15 +486,24 @@ def main() -> None:
     if not tickers:
         raise SystemExit("❌ No tickers left after exclusions.")
 
-    end_date = roll_end_date(date_raw if date_raw else None)
+    end_date = roll_end_date(end_raw if end_raw else None)
 
-    # =============================
-    # load today's skip file ONLY when date input is blank
-    # =============================
+    if start_raw:
+        start_date = pd.to_datetime(start_raw).normalize()
+        if start_date.weekday() >= 5:
+            start_date -= BDay(1)
+    else:
+        start_date = end_date
+
+    if start_date > end_date:
+        raise SystemExit("❌ StartDate must be <= EndDate.")
+
+    # daily skip file only in daily mode
     skip_file_path = None
     is_first_run_today = False
     skip_today_set: set[str] = set()
-    if not single_date_input:
+
+    if daily_mode:
         try:
             os.makedirs(FIRST_RUN_SKIP_DIR, exist_ok=True)
         except Exception:
@@ -401,7 +528,6 @@ def main() -> None:
 
         if not tickers:
             raise SystemExit("❌ No tickers left after exclusions + today skip file.")
-    # =============================
 
     MIN_SCORE = 60
     MIN_DOLLARVOL = 50_000_000
@@ -410,7 +536,6 @@ def main() -> None:
     hist_map = download_many(tickers, end_date)
 
     scan_rows: list[dict] = []
-    feats_map: Dict[str, pd.DataFrame] = {}  # kept: harmless, and you may want it later
     newly_skipped_today: set[str] = set()
 
     for t in tickers:
@@ -420,62 +545,82 @@ def main() -> None:
 
         feats = add_features(df)
         feats = add_relative_strength(feats, spy_close)
-        feats_map[t] = feats
 
-        bar_date = feats.index[feats.index <= end_date]
-        if len(bar_date) == 0:
+        bar_dates = feats.index[feats.index <= end_date]
+        if len(bar_dates) == 0:
             continue
-        bar_date = bar_date[-1]
 
-        # first run skip rule (NO DATE INPUT ONLY)
-        if not single_date_input and is_first_run_today:
-            _i_tmp = int(feats.index.get_loc(bar_date))
+        if daily_mode and is_first_run_today:
+            bar_date_latest = bar_dates[-1]
+            _i_tmp = int(feats.index.get_loc(bar_date_latest))
             _dayret_tmp = safe(feats.iloc[_i_tmp].get("DayRetPct", np.nan))
             if np.isfinite(_dayret_tmp) and _dayret_tmp < FIRST_RUN_SKIP_MIN_DAYRET:
                 newly_skipped_today.add(t)
                 continue
 
-        i = int(feats.index.get_loc(bar_date))
-        base = footprint_score(feats.iloc[i])
-        bonus = confirmation_bonus(feats, i)
-        score = float(min(100.0, base + bonus))
+        scan_dates = feats.index[(feats.index >= start_date) & (feats.index <= end_date)]
+        if len(scan_dates) == 0:
+            continue
 
-        dayret = safe(feats.iloc[i].get("DayRetPct", np.nan))
+        for bar_date in scan_dates:
+            i = int(feats.index.get_loc(bar_date))
+            if i + 1 >= len(feats):
+                continue
 
-        # NextDay% (BarDate close -> next trading day close)
-        nextday_pct = np.nan
-        if i + 1 < len(feats):
+            base = footprint_score(feats.iloc[i])
+            bonus = confirmation_bonus(feats, i)
+            score = float(min(100.0, base + bonus))
+
+            dayret = safe(feats.iloc[i].get("DayRetPct", np.nan))
+
+            nextday_pct = np.nan
             c0 = safe(feats.iloc[i].get("Close", np.nan))
             c1 = safe(feats.iloc[i + 1].get("Close", np.nan))
             if np.isfinite(c0) and np.isfinite(c1) and c0 != 0:
                 nextday_pct = (c1 / c0 - 1) * 100
 
-        # main scan gate
-        if score < MIN_SCORE:
-            continue
+            # ONLY keep rows when NextDay% hits upside or downside threshold
+            if not (
+                np.isfinite(nextday_pct) and
+                (nextday_pct >= NEXTDAY_MIN_UP_PCT or nextday_pct <= NEXTDAY_MIN_DOWN_PCT)
+            ):
+                continue
 
-        dollar_vol = safe(feats.iloc[i].get("DollarVol", np.nan))
-        if np.isfinite(dollar_vol) and dollar_vol < MIN_DOLLARVOL:
-            continue
-        if np.isfinite(dayret) and dayret > MAX_SIGNAL_DAY_PCT:
-            continue
-        if not (np.isfinite(dayret) and dayret >= MIN_SIGNAL_DAY_PCT):
-            continue
+            if score < MIN_SCORE:
+                continue
 
-        scan_rows.append({
-            "Ticker": t,
-            "BarDate": bar_date.strftime("%Y-%m-%d"),
-            "SignalDay%": (f"{dayret:.2f}%" if np.isfinite(dayret) else ""),
-            "NextDay%": (f"{nextday_pct:.2f}%" if np.isfinite(nextday_pct) else ""),
-            "Score": score,
-            "BaseScore": base,
-            "Bonus": bonus,
-            "Close": safe(feats.iloc[i].get("Close", np.nan)),
-            "TC2000_AbsRange": round(safe(feats.iloc[i].get("TC2000_AbsRange", np.nan)), 2),
-        })
+            dollar_vol = safe(feats.iloc[i].get("DollarVol", np.nan))
+            if np.isfinite(dollar_vol) and dollar_vol < MIN_DOLLARVOL:
+                continue
+            if np.isfinite(dayret) and dayret > MAX_SIGNAL_DAY_PCT:
+                continue
+                # ✅ Minimum Signal Day %
+            if not (np.isfinite(dayret) and dayret >= MIN_SIGNAL_DAY_PCT):
+                continue
 
-    # write today's skip file at end of first run (NO DATE INPUT ONLY)
-    if not single_date_input and is_first_run_today and skip_file_path:
+            # ✅ latest earnings date ON OR BEFORE this BarDate (already happened)
+            latest_earn_before_bar = get_latest_earnings_on_or_before_date_str(t, bar_date)
+
+            # ✅ NEW FILTER: exclude if BarDate == earnings OR next trading day == earnings
+            if EXCLUDE_IF_EARNINGS_ON_BAR_OR_NEXT_TRADING_DAY:
+                if should_exclude_row_due_to_earnings(bar_date, latest_earn_before_bar):
+                    continue
+
+            scan_rows.append({
+                "Ticker": t,
+                "BarDate": bar_date.strftime("%Y-%m-%d"),
+                "SignalDay%": (f"{dayret:.2f}%" if np.isfinite(dayret) else ""),
+                "NextDay%": (f"{nextday_pct:.2f}%" if np.isfinite(nextday_pct) else ""),
+                "Score": score,
+                "BaseScore": base,
+                "Bonus": bonus,
+                "Close": safe(feats.iloc[i].get("Close", np.nan)),
+                "TC2000_AbsRange": round(safe(feats.iloc[i].get("TC2000_AbsRange", np.nan)), 2),
+                "LatestEarningsDate": latest_earn_before_bar,
+            })
+
+    # write today's skip file at end of first run (daily mode only)
+    if daily_mode and is_first_run_today and skip_file_path:
         if newly_skipped_today:
             try:
                 tmp_path = skip_file_path + ".tmp"
@@ -507,45 +652,23 @@ def main() -> None:
 
     scan_df = (
         pd.DataFrame(scan_rows)
-        .sort_values(["Score"], ascending=False)
+        .sort_values(["BarDate"], ascending=True)
         .reset_index(drop=True)
     )
-    scan_df["EarningsDate"] = scan_df["Ticker"].apply(get_next_earnings_date_str)
-
-    # =============================
-    # FILTER: TC2000_AbsRange < 80
-    # Apply ONLY when date input is blank
-    # =============================
-    if not single_date_input:
+    # FILTER: TC2000_AbsRange < 80 only in daily mode
+    if daily_mode:
         scan_df = scan_df[
             scan_df["TC2000_AbsRange"].notna() &
             (scan_df["TC2000_AbsRange"] < 80)
         ].reset_index(drop=True)
 
-    # Exclude tickers with earnings in the next N days (BUT KEEP TODAY)
-    if EARNINGS_EXCLUDE_DAYS >= 0:
-        _e_ts = pd.to_datetime(scan_df["EarningsDate"], errors="coerce").dt.normalize()
-        _ref = pd.to_datetime(end_date).normalize()
-        _days = (_e_ts - _ref).dt.days
+    # ✅ OUTPUT COLUMN ORDER (LatestEarningsDate moved to after BarDate)
+    scan_df = scan_df[
+        ["Ticker", "BarDate", "LatestEarningsDate", "SignalDay%", "NextDay%", "Score",
+         "BaseScore", "Bonus", "Close", "TC2000_AbsRange"]
+    ]
 
-        # exclude tomorrow..N, keep today (0)
-        scan_df = scan_df[
-            _e_ts.isna() | ~((_days >= 1) & (_days <= EARNINGS_EXCLUDE_DAYS))
-        ].reset_index(drop=True)
-
-    # ✅ DO NOT CHANGE THIS
     print_scan_with_earnings_highlight(scan_df, end_date)
-
-    # Print tickers from (Exclude input + scan table), comma-separated, no spaces
-    combined = exclude_tickers + scan_df["Ticker"].astype(str).tolist()
-    seen = set()
-    combined_unique = []
-    for t in combined:
-        t = str(t).upper().replace(".", "-").strip()
-        if t and t not in seen:
-            combined_unique.append(t)
-            seen.add(t)
-    print("\n" + ",".join(combined_unique))
 
 
 if __name__ == "__main__":

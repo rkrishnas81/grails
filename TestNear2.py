@@ -20,13 +20,11 @@ pd.set_option("display.colheader_justify", "center")
 
 
 # =============================
-# BUY LIST SETTINGS (kept: used for Verdict logic if you re-add it later)
+# BUY LIST SETTINGS
 # =============================
 BUY_MIN_SCORE = 70.0
 MAX_DAYRET_FOR_BUY = 6.0
-PRINT_BUY_LIST_TOP_N = 5  # currently unused after cleanup, safe to keep or remove
-MIN_SIGNAL_DAY_PCT = 2.5
-
+PRINT_BUY_LIST_TOP_N = 5
 
 # =============================
 # EARNINGS FILTER SETTINGS
@@ -36,10 +34,9 @@ EARNINGS_EXCLUDE_DAYS = 5   # (5 = next 5 days, 0 = today only, -1 = disable)
 # =============================
 # "First run of the day" skip list settings (NO DATE INPUT ONLY)
 # =============================
-FIRST_RUN_SKIP_MIN_DAYRET = 1.0
+FIRST_RUN_SKIP_MIN_DAYRET = 999
 FIRST_RUN_SKIP_FILE_PREFIX = "skip_under1p_"
 FIRST_RUN_SKIP_DIR = "daily_skips"
-
 
 # =============================
 # BASIC HELPERS
@@ -102,6 +99,117 @@ def _extract_ohlcv(hist: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
     return df[cols].dropna()
 
 
+def _pct_str_to_float(v):
+    if isinstance(v, str):
+        v = v.strip().replace("%", "")
+        return float(v) if v else np.nan
+    try:
+        return float(v)
+    except Exception:
+        return np.nan
+
+def _to_float(x) -> float:
+    """Robust scalar -> float conversion."""
+    try:
+        return float(x)
+    except Exception:
+        return float(np.asarray(x).item())
+def _filter_rth_us(day: pd.DataFrame) -> pd.DataFrame:
+    """
+    Keep only US regular trading hours 09:30–16:00 America/New_York.
+    Yahoo intraday often comes tz-naive but already in exchange local time.
+    """
+    if day is None or day.empty:
+        return day
+
+    idx = pd.to_datetime(day.index)
+
+    if idx.tz is None:
+        # ✅ assume timestamps are already in US/Eastern (common for Yahoo intraday)
+        idx = idx.tz_localize("America/New_York")
+    else:
+        idx = idx.tz_convert("America/New_York")
+
+    out = day.copy()
+    out.index = idx
+
+    return out.between_time("09:30", "16:00", inclusive="both")
+    
+# =============================
+# ✅ FAST INTRADAY PATCH (ONE BULK DOWNLOAD PER BATCH)
+# Fixes: Yahoo daily bar lagging intraday (Volume/Close updates late)
+# =============================
+def patch_today_from_intraday_bulk(
+    daily_map: Dict[str, pd.DataFrame],
+    tickers: List[str],
+    interval: str = "5m",
+    period: str = "2d",
+    batch_size: int = 80,
+) -> Dict[str, pd.DataFrame]:
+    out = dict(daily_map)
+
+    for batch in chunks(tickers, batch_size):
+        try:
+            intra = yf.download(
+                " ".join(batch),
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=False,
+                group_by="ticker",
+                threads=True,
+            )
+        except Exception:
+            continue
+
+        if intra is None or intra.empty:
+            continue
+
+        for t in batch:
+            df_daily = out.get(t)
+            if df_daily is None or df_daily.empty:
+                continue
+
+            # ✅ target date = last daily bar date (prevents after-hours rollover)
+            target_date = pd.to_datetime(df_daily.index[-1]).date()
+
+            if isinstance(intra.columns, pd.MultiIndex):
+                if t not in intra.columns.get_level_values(0):
+                    continue
+                day = intra[t].dropna()
+            else:
+                day = intra.dropna()
+
+            if day is None or day.empty:
+                continue
+
+            # ✅ slice intraday to SAME date as daily bar
+            day = day[day.index.date == target_date]
+            if day.empty:
+                continue
+            # ✅ NEW: keep only regular market hours (no pre/after market)
+            day = _filter_rth_us(day)
+            if day.empty:
+                continue
+
+            o = _to_float(day["Open"].iloc[0])
+            h = _to_float(day["High"].max())
+            l = _to_float(day["Low"].min())
+            c = _to_float(day["Close"].iloc[-1])
+            v = _to_float(day["Volume"].sum())
+
+            d = df_daily.copy()
+            last_idx = d.index[-1]
+            d.loc[last_idx, ["Open", "High", "Low", "Close", "Volume"]] = [o, h, l, c, v]
+            out[t] = d
+
+        time.sleep(0.15)
+
+    return out
+
+
+
+
 # =============================
 # EARNINGS DATE (NEXT) - cached
 # =============================
@@ -137,8 +245,67 @@ def get_next_earnings_date_str(ticker: str) -> str:
 
 
 # =============================
+# ✅ SAME NET CALC, BUT FOR ANY SUBSET (NO LOGIC CHANGE)
+# =============================
+def _net_stats(df: pd.DataFrame) -> dict:
+    """Returns Gain/Loss/Net using EXACT same rules as your current Net calc."""
+    if df is None or df.empty:
+        return {"gain": 0.0, "loss": 0.0, "net": 0.0}
+
+    gain = float(
+        np.where(
+            (df["NextDayOpen%_num"] > 0) & (df["NextDayLow%_num"] < -1),
+            -1.0,
+            np.where(
+                (df["NextDayOpen%_num"] > 0),
+                df["NextDay%_num"],
+                0.0
+            )
+        ).sum()
+    )
+
+    loss = float(
+        df.loc[df["NextDayOpen%_num"] < 0, "NextDayOpen%_num"].sum(skipna=True)
+    )
+
+    net = gain - abs(loss)
+    return {"gain": gain, "loss": loss, "net": net}
+
+
+# =============================
 # DOWNLOAD (DAILY)
 # =============================
+def download_history(ticker: str, end_date: pd.Timestamp) -> pd.DataFrame:
+    hist = None
+    for attempt in range(3):
+        try:
+            hist = yf.download(
+                ticker,
+                period="1y",
+                interval="1d",
+                progress=False,
+                auto_adjust=False,
+                group_by="ticker",
+                threads=True,
+            )
+            break
+        except Exception:
+            time.sleep(0.6 * (2 ** attempt))
+
+    df = _extract_ohlcv(hist, ticker)
+    if df is None or df.empty:
+        raise SystemExit(f"❌ No data returned for {ticker}")
+
+    df.index = pd.to_datetime(df.index)
+
+    end_plus = end_date_plus_one_trading_day(end_date)
+    df = df.loc[df.index <= end_plus]
+
+    if df.empty:
+        raise SystemExit(f"❌ {ticker} has no rows after end_date filter.")
+    return df
+
+
 def download_spy_close(end_date: pd.Timestamp) -> pd.Series:
     hist = None
     for attempt in range(3):
@@ -302,7 +469,7 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
 
 
 # =============================
-# PRINT HELPER (kept: used)
+# PRINT HELPER
 # =============================
 def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Timestamp):
     if scan_df.empty:
@@ -313,16 +480,13 @@ def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Times
     tomorrow = (today + BDay(1)).normalize()  # next trading day
     red_set = {today.strftime("%Y-%m-%d"), tomorrow.strftime("%Y-%m-%d")}
 
-    # normal table string
     table = scan_df.to_string(index=False)
     lines = table.splitlines()
 
-    # header is lines[0], separator is lines[1]
     print(lines[0])
     if len(lines) > 1:
         print(lines[1])
 
-    # find the EarningsDate column location from header
     header = lines[0]
     col_name = "EarningsDate"
     start = header.find(col_name)
@@ -407,10 +571,27 @@ def main() -> None:
     MIN_DOLLARVOL = 50_000_000
 
     spy_close = download_spy_close(end_date)
+
+    # for QQQ line in history summary
+    qqq_df = download_history("QQQ", end_date)
+    qqq_nextday_open_pct = (qqq_df["Open"].shift(-1) / qqq_df["Close"] - 1) * 100
+
     hist_map = download_many(tickers, end_date)
 
+    # ✅ FAST intraday patch ONCE (only when date input is blank)
+    if not single_date_input:
+        hist_map = patch_today_from_intraday_bulk(
+            hist_map,
+            tickers,
+            interval="5m",     # change to "1m" if you want faster “trigger time” but slower scan
+            period="2d",
+            batch_size=80,
+        )
+
     scan_rows: list[dict] = []
-    feats_map: Dict[str, pd.DataFrame] = {}  # kept: harmless, and you may want it later
+    feats_map: Dict[str, pd.DataFrame] = {}
+    confirm_rows: list[dict] = []
+
     newly_skipped_today: set[str] = set()
 
     for t in tickers:
@@ -427,7 +608,7 @@ def main() -> None:
             continue
         bar_date = bar_date[-1]
 
-        # first run skip rule (NO DATE INPUT ONLY)
+        # first run skip rule (NO DATE INPUT ONLY) - kept exactly
         if not single_date_input and is_first_run_today:
             _i_tmp = int(feats.index.get_loc(bar_date))
             _dayret_tmp = safe(feats.iloc[_i_tmp].get("DayRetPct", np.nan))
@@ -442,14 +623,6 @@ def main() -> None:
 
         dayret = safe(feats.iloc[i].get("DayRetPct", np.nan))
 
-        # NextDay% (BarDate close -> next trading day close)
-        nextday_pct = np.nan
-        if i + 1 < len(feats):
-            c0 = safe(feats.iloc[i].get("Close", np.nan))
-            c1 = safe(feats.iloc[i + 1].get("Close", np.nan))
-            if np.isfinite(c0) and np.isfinite(c1) and c0 != 0:
-                nextday_pct = (c1 / c0 - 1) * 100
-
         # main scan gate
         if score < MIN_SCORE:
             continue
@@ -459,19 +632,35 @@ def main() -> None:
             continue
         if np.isfinite(dayret) and dayret > MAX_SIGNAL_DAY_PCT:
             continue
-        if not (np.isfinite(dayret) and dayret >= MIN_SIGNAL_DAY_PCT):
-            continue
 
         scan_rows.append({
             "Ticker": t,
             "BarDate": bar_date.strftime("%Y-%m-%d"),
             "SignalDay%": (f"{dayret:.2f}%" if np.isfinite(dayret) else ""),
-            "NextDay%": (f"{nextday_pct:.2f}%" if np.isfinite(nextday_pct) else ""),
             "Score": score,
             "BaseScore": base,
             "Bonus": bonus,
             "Close": safe(feats.iloc[i].get("Close", np.nan)),
             "TC2000_AbsRange": round(safe(feats.iloc[i].get("TC2000_AbsRange", np.nan)), 2),
+        })
+
+        verdict = "WATCH"
+        if (
+            score >= BUY_MIN_SCORE and
+            np.isfinite(dayret) and dayret <= MAX_DAYRET_FOR_BUY
+        ):
+            verdict = "BUY"
+
+        if np.isfinite(dayret) and dayret > 12:
+            verdict = "SKIP"
+
+        confirm_rows.append({
+            "Ticker": t,
+            "BarDate": bar_date.strftime("%Y-%m-%d"),
+            "Score": round(score, 1),
+            "DayRetPct": round(dayret, 2) if np.isfinite(dayret) else np.nan,
+            "Verdict": verdict,
+            "Plan": "BUY signal close / sell next day"
         })
 
     # write today's skip file at end of first run (NO DATE INPUT ONLY)
@@ -546,6 +735,30 @@ def main() -> None:
             combined_unique.append(t)
             seen.add(t)
     print("\n" + ",".join(combined_unique))
+
+    # BUY LIST
+    if confirm_rows:
+        cdf = pd.DataFrame(confirm_rows)
+        buy_df = cdf[cdf["Verdict"] == "BUY"].copy()
+        buy_df = buy_df.sort_values(["Score"], ascending=False).head(PRINT_BUY_LIST_TOP_N)
+
+        print("\nHistory Table Exclude Rules")
+        print("1) Net (Gain - Loss) < 1.5%")
+        print("2) If single date input AND SignalDay% > 12%")
+        print("  Sum of NextDay% (Open > 0, cap -1%) means")
+        print("  Open>0 and Low <-1  then -1")
+        print("  Open>0 and Low >-1 then nextday ")
+        print("  Sum of NextDayOpen% (Open < 0) means if Open<0 sum(Open)")
+        print(f"  Earnings filter: exclude tickers with earnings in the next {EARNINGS_EXCLUDE_DAYS} day(s). (-1 = disabled)")
+        print("4) Score Rules")
+        print("    60+ ignore or watchlist, 70+ is good, 80+ is great, 90+ is rare and dangerous.")
+        print("********7 Rules*********")
+        print("1. Only Min 2% to Max 6% up on Signal Day (example 1%up, but gap down and solid came back still dont do)")
+        print("2. Avoid Consecutive days Or often like repeated in 1 or 2 days")
+        print("3. if open minus next Day Sell immediately")
+        print("4. avoid If signal Day is ready for break out (except 3rd or 4th time).")
+        print("5. avoid down day or reversal next single day like parrlel candle")
+        print("6. avoid down day with Signal Days and less than 1% except same candle type of previous day (wait for next Day)")
 
 
 if __name__ == "__main__":
