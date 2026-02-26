@@ -37,6 +37,12 @@ PRINT_BUY_LIST_TOP_N = 5
 
 
 # =============================
+# ✅ GLOBAL VOLUME BOOST (MATCH SCAN SCRIPT)
+# =============================
+VOLUME_BOOST_PCT = 25.0  # set 0 to disable
+
+
+# =============================
 # BASIC HELPERS
 # =============================
 def parse_tickers(s: str) -> List[str]:
@@ -97,6 +103,34 @@ def _pct_str_to_float(v):
         return float(v)
     except Exception:
         return np.nan
+
+
+# =============================
+# ✅ APPLY VOLUME BOOST (MATCH SCAN SCRIPT)
+# =============================
+def apply_volume_boost(row: pd.Series, boost_pct: float) -> pd.Series:
+    """
+    Boosts row['Volume'] by boost_pct and recomputes DollarVol + VolRel.
+    Safe to call for daily mode.
+    """
+    if boost_pct is None or boost_pct == 0:
+        return row
+
+    v_raw = safe(row.get("Volume", np.nan))
+    if not np.isfinite(v_raw):
+        return row
+
+    v = v_raw * (1.0 + boost_pct / 100.0)
+    row["Volume"] = v
+
+    close = safe(row.get("Close", np.nan))
+    if np.isfinite(close):
+        row["DollarVol"] = close * v
+
+    vol20 = safe(row.get("Vol20", np.nan))
+    row["VolRel"] = np.nan if (not np.isfinite(vol20) or vol20 == 0) else (v / vol20)
+
+    return row
 
 
 # =============================
@@ -318,15 +352,10 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
 #   FIXED: IntradayScore is computed BY SIGNAL DATE
 # =============================
 
-# Cache intraday downloads so we don't repeatedly call Yahoo for same ticker+window
 _INTRADAY_CACHE: dict[Tuple[str, str, str], pd.DataFrame] = {}
 
 
 def _download_60m_window(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """
-    Download 60m bars between start and end (inclusive-ish).
-    Using start/end is required for historical Signal Dates; period="10d" won't reach September, etc.
-    """
     start_s = pd.to_datetime(start).strftime("%Y-%m-%d")
     end_s = pd.to_datetime(end).strftime("%Y-%m-%d")
 
@@ -353,7 +382,6 @@ def _download_60m_window(ticker: str, start: pd.Timestamp, end: pd.Timestamp) ->
         _INTRADAY_CACHE[key] = pd.DataFrame()
         return pd.DataFrame()
 
-    # Flatten MultiIndex if present
     if isinstance(hist.columns, pd.MultiIndex):
         if ticker in hist.columns.get_level_values(0):
             df = hist[ticker].copy()
@@ -376,13 +404,8 @@ def _download_60m_window(ticker: str, start: pd.Timestamp, end: pd.Timestamp) ->
 
 
 def intraday_confirm_60m(ticker: str, target_date: pd.Timestamp) -> dict:
-    """
-    Scores the LAST 3 FULL 60-minute bars on the *target_date*.
-    This fixes the bug where you were scoring the latest day instead of the signal day.
-    """
     target_dt = pd.to_datetime(target_date).normalize()
 
-    # Pull a small window around the date to ensure we have that day's bars
     start = target_dt - pd.Timedelta(days=5)
     end = target_dt + pd.Timedelta(days=1)
 
@@ -394,9 +417,6 @@ def intraday_confirm_60m(ticker: str, target_date: pd.Timestamp) -> dict:
     if len(day_df) < 4:
         return {"ok": False, "score": 0.0, "reason": f"not_enough_60m_bars_for_{target_dt.date()}"}
 
-    # Drop possible partial last bar IF it exists.
-    # We avoid timezone assumptions; safest is: if the last bar has very low volume vs median,
-    # it might be partial. Keep simple, but conservative.
     if len(day_df) >= 2:
         v_last = float(day_df["Volume"].iloc[-1])
         v_med = float(day_df["Volume"].median())
@@ -511,13 +531,11 @@ def build_buy_table_by_date(
         if sig_dt in feats.index:
             dayret = safe(feats.loc[sig_dt].get("DayRetPct", np.nan))
 
-        # Regime BY signal date
         regime = {"ok": True, "score": 50.0, "reason": "regime_disabled"}
         if USE_REGIME_CONFIRM:
             regime = regime_confirm_qqq_at_date(qqq_daily_df, sig_dt)
         rscore = float(regime["score"]) if USE_REGIME_CONFIRM else 75.0
 
-        # Intraday BY signal date (FIX)
         intr = {"ok": True, "score": 50.0, "reason": "intraday_disabled"}
         if USE_INTRADAY_60M_CONFIRM:
             intr = intraday_confirm_60m(ticker, sig_dt)
@@ -538,7 +556,6 @@ def build_buy_table_by_date(
         if np.isfinite(dayret) and dayret > 12:
             verdict = "SKIP"
 
-        # ✅ NEW COLUMN ONLY (no logic changes): MeetsCriteria
         meets_criteria = (
             np.isfinite(score) and (score >= 72.0) and (score <= 82.0) and
             (iscore >= 75.0) and
@@ -553,7 +570,7 @@ def build_buy_table_by_date(
             "DayRetPct": round(dayret, 2) if np.isfinite(dayret) else np.nan,
             "IntradayScore": round(iscore, 1),
             "RegimeScore": round(rscore, 1),
-            "MeetsCriteria": "Yes" if meets_criteria else "No",  # ✅ ADDED
+            "MeetsCriteria": "Yes" if meets_criteria else "No",
             "Verdict": verdict,
             "Plan": "BUY signal close / sell next day" if verdict == "BUY" else "",
             "IntradayReason": intr.get("reason", ""),
@@ -586,7 +603,11 @@ def print_history_output(
 
     rows: list[dict] = []
     for i in range(len(feats)):
-        base = footprint_score(feats.iloc[i])
+        # ✅ MATCH SCAN: score using a boosted copy of the row (does NOT change printed columns)
+        row_for_score = feats.iloc[i].copy()
+        row_for_score = apply_volume_boost(row_for_score, VOLUME_BOOST_PCT)
+
+        base = footprint_score(row_for_score)
         bonus = confirmation_bonus(feats, i)
         score = float(min(100.0, base + bonus))
 
@@ -612,9 +633,6 @@ def print_history_output(
     out = out.tail(90).reset_index(drop=True)
     out = out[out["Score"] >= min_score].reset_index(drop=True)
 
-    # ✅ NEW COLUMN ONLY (no logic changes): MeetsCriteria for History table
-    # Uses the same metric rules:
-    # Score 72–82, IntradayScore ≥ 75, RegimeScore ≥ 70, DayRetPct 1–5%
     intraday_scores = []
     regime_scores = []
     meets_flags = []
@@ -622,18 +640,15 @@ def print_history_output(
     for _, r in out.iterrows():
         sig_dt = pd.to_datetime(str(r["Signal Date"]))
 
-        # DayRetPct from feats (numeric)
         dayret = float("nan")
         if sig_dt in feats.index:
             dayret = safe(feats.loc[sig_dt].get("DayRetPct", np.nan))
 
-        # Regime by date
         regime = {"ok": True, "score": 50.0, "reason": "regime_disabled"}
         if USE_REGIME_CONFIRM:
             regime = regime_confirm_qqq_at_date(qqq_daily_df, sig_dt)
         rscore = float(regime["score"]) if USE_REGIME_CONFIRM else 75.0
 
-        # Intraday by date
         intr = {"ok": True, "score": 50.0, "reason": "intraday_disabled"}
         if USE_INTRADAY_60M_CONFIRM:
             intr = intraday_confirm_60m(ticker, sig_dt)
@@ -721,7 +736,6 @@ def print_history_output(
         ],
     )
 
-    # Fix pandas FutureWarning (applymap deprecated)
     summary_df = summary_df.map(lambda x: f"{x:.2f}%")
 
     risk_open_val = float(_tmp["NextDayOpen%_num"].min(skipna=True)) if not _tmp.empty else float("nan")
@@ -751,7 +765,12 @@ def print_history_output(
     if len(bar_dates) > 0:
         bar_date = bar_dates[-1]
         i = int(feats.index.get_loc(bar_date))
-        current_score = float(min(100.0, footprint_score(feats.iloc[i]) + confirmation_bonus(feats, i)))
+
+        # ✅ MATCH SCAN: compute current score using boosted row
+        row_for_score = feats.iloc[i].copy()
+        row_for_score = apply_volume_boost(row_for_score, VOLUME_BOOST_PCT)
+
+        current_score = float(min(100.0, footprint_score(row_for_score) + confirmation_bonus(feats, i)))
         print(f"Current Score: {current_score:.1f}")
 
     print("\n" + "-" * 90)
@@ -772,18 +791,14 @@ def print_history_output(
         qqq_daily_df=qqq_daily_df,
     )
 
-    
-
     if buy_tbl.empty:
         print("No Signal Dates to evaluate.")
     else:
-        # Optional: show only BUY rows top N
         buy_only = buy_tbl[buy_tbl["Verdict"] == "BUY"].copy()
         if not buy_only.empty:
             buy_only = buy_only.sort_values(["Score", "IntradayScore", "RegimeScore"], ascending=False).head(PRINT_BUY_LIST_TOP_N)
             print("\nTOP BUY CANDIDATES:")
             print(buy_only[["Signal Date", "Ticker", "Score", "DayRetPct", "IntradayScore", "RegimeScore", "Verdict", "Plan"]].to_string(index=False))
-        
 
 
 # =============================
@@ -809,7 +824,6 @@ def main() -> None:
 
     spy_close = download_spy_close(end_date)
 
-    # QQQ daily (used for regime-by-date and summary QQQ nextdayopen)
     qqq_daily_df = download_history("QQQ", end_date)
     qqq_nextday_open_pct = (qqq_daily_df["Open"].shift(-1) / qqq_daily_df["Close"] - 1) * 100
 
@@ -833,11 +847,16 @@ def main() -> None:
         bar_date = bar_date[-1]
 
         i = int(feats.index.get_loc(bar_date))
-        base = footprint_score(feats.iloc[i])
+
+        # ✅ MATCH SCAN: score using boosted row copy
+        row_for_score = feats.iloc[i].copy()
+        row_for_score = apply_volume_boost(row_for_score, VOLUME_BOOST_PCT)
+
+        base = footprint_score(row_for_score)
         bonus = confirmation_bonus(feats, i)
         score = float(min(100.0, base + bonus))
 
-        dollar_vol = safe(feats.iloc[i].get("DollarVol", np.nan))
+        dollar_vol = safe(row_for_score.get("DollarVol", np.nan))
         if np.isfinite(dollar_vol) and dollar_vol < MIN_DOLLARVOL:
             continue
 
@@ -849,8 +868,8 @@ def main() -> None:
             "Bonus": bonus,
             "Close": safe(feats.iloc[i].get("Close", np.nan)),
             "DayRetPct": safe(feats.iloc[i].get("DayRetPct", np.nan)),
-            "VolRel": safe(feats.iloc[i].get("VolRel", np.nan)),
-            "DollarVol": dollar_vol,
+            "VolRel": safe(row_for_score.get("VolRel", np.nan)),        # keep column, now matches scan scoring
+            "DollarVol": dollar_vol,                                    # based on boosted row
             "RS": safe(feats.iloc[i].get("RS", np.nan)),
             "Reasons": "(see History output for full breakdown)",
         })
