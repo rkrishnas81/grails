@@ -38,13 +38,6 @@ VOLUME_BOOST_PCT = 25.0  # set 0 to disable
 
 
 # =============================
-# ANSI COLORS (terminal)
-# =============================
-RED = "\033[91m"   # bright red
-RESET = "\033[0m"
-
-
-# =============================
 # BASIC HELPERS
 # =============================
 def parse_tickers(s: str) -> List[str]:
@@ -100,35 +93,6 @@ def _extract_ohlcv(hist: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
     if not set(cols).issubset(df.columns):
         return None
     return df[cols].dropna()
-
-
-# =============================
-# EARNINGS (for red highlighting)
-# =============================
-def get_earnings_dates(ticker: str, limit: int = 12) -> pd.DatetimeIndex:
-    """
-    Earnings dates as normalized (date-only) timestamps.
-    """
-    try:
-        tk = yf.Ticker(ticker)
-        edf = tk.get_earnings_dates(limit=limit)  # DataFrame indexed by earnings datetime
-        if edf is None or edf.empty:
-            return pd.DatetimeIndex([])
-        idx = pd.to_datetime(edf.index).tz_localize(None).normalize()
-        return pd.DatetimeIndex(sorted(idx.unique()))
-    except Exception:
-        return pd.DatetimeIndex([])
-
-
-def is_red_earn_match(bar_date: pd.Timestamp, earnings_dates: pd.DatetimeIndex) -> bool:
-    """
-    True if BarDate is earnings date OR next trading day is earnings date.
-    """
-    if earnings_dates is None or len(earnings_dates) == 0:
-        return False
-    bd = pd.to_datetime(bar_date).normalize()
-    next_bd = (bd + BDay(1)).normalize()
-    return (bd in earnings_dates) or (next_bd in earnings_dates)
 
 
 # =============================
@@ -346,11 +310,6 @@ def main() -> None:
     if start_date > end_date:
         raise SystemExit("❌ StartDate must be <= EndDate.")
 
-    # Build earnings map once (so we can color rows later)
-    earnings_map: dict[str, pd.DatetimeIndex] = {}
-    for t in tickers:
-        earnings_map[t] = get_earnings_dates(t, limit=12)
-
     spy_close = download_spy_close(end_date)
     hist_map = download_many(tickers, end_date)
 
@@ -403,8 +362,6 @@ def main() -> None:
             if not (np.isfinite(dayret) and dayret >= MIN_SIGNAL_DAY_PCT):
                 continue
 
-            red_earn = is_red_earn_match(bar_date, earnings_map.get(t))
-
             scan_rows.append({
                 "Ticker": t,
                 "BarDate": bar_date.strftime("%Y-%m-%d"),
@@ -415,7 +372,6 @@ def main() -> None:
                 "Bonus": bonus,
                 "Close": safe(feats.iloc[i].get("Close", np.nan)),
                 "TC2000_AbsRange": round(safe(feats.iloc[i].get("TC2000_AbsRange", np.nan)), 2),
-                "RedEarnings": bool(red_earn),  # <-- used only for coloring
             })
 
     if not scan_rows:
@@ -428,19 +384,14 @@ def main() -> None:
         .reset_index(drop=True)
     )
 
-    # Color rows red if BarDate == EarningsDate OR BarDate+1BDay == EarningsDate
-    display_df = scan_df.drop(columns=["RedEarnings"], errors="ignore")
-
-    header = "  ".join(display_df.columns)
+    # keep your manual header + row printing style
+    header = "  ".join(scan_df.columns)
     print(header)
     print("-" * len(header))
 
-    for idx, r in display_df.iterrows():
-        row_text = "  ".join(str(r[c]) for c in display_df.columns)
-        if bool(scan_df.loc[idx, "RedEarnings"]):
-            print(f"{RED}{row_text}{RESET}")
-        else:
-            print(row_text)
+    for _, r in scan_df.iterrows():
+        row_text = "  ".join(str(r[c]) for c in scan_df.columns)
+        print(row_text)
 
 
 if __name__ == "__main__":
