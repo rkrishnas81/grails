@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from pandas.tseries.offsets import BDay
+from colorama import init as colorama_init, Fore, Style
 
 
 # =============================
@@ -135,36 +136,149 @@ def last_completed_intraday_bar_ts(interval: str = "5m") -> pd.Timestamp:
 
 
 # =============================
-# EARNINGS DATE (NEXT) - cached
+# EARNINGS DATES (NEXT + LAST) - cached
 # =============================
-_EARNINGS_CACHE: dict[str, str] = {}
+_EARNINGS_NEXT_CACHE: dict[str, str] = {}
+_EARNINGS_LAST_CACHE: dict[str, str] = {}
+_EARNINGS_DF_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def _get_earnings_dates_df(ticker: str, limit: int = 12) -> pd.DataFrame | None:
+    """
+    Fetch earnings dates dataframe once per ticker (cached).
+    """
+    t = ticker.upper().replace(".", "-").strip()
+    if not t:
+        return None
+    if t in _EARNINGS_DF_CACHE:
+        return _EARNINGS_DF_CACHE[t]
+
+    try:
+        edf = yf.Ticker(t).get_earnings_dates(limit=limit)
+        if edf is None or edf.empty:
+            _EARNINGS_DF_CACHE[t] = pd.DataFrame()
+            return _EARNINGS_DF_CACHE[t]
+        _EARNINGS_DF_CACHE[t] = edf
+        return edf
+    except Exception:
+        _EARNINGS_DF_CACHE[t] = pd.DataFrame()
+        return _EARNINGS_DF_CACHE[t]
+
+
+def _to_pacific_ts(x: pd.Timestamp) -> pd.Timestamp:
+    """
+    Convert a Timestamp (tz-aware or tz-naive) to tz-aware Pacific.
+    If tz-naive, assume US/Eastern (Yahoo commonly uses ET).
+    """
+    ts = pd.to_datetime(x)
+    if getattr(ts, "tzinfo", None) is None:
+        # assume Eastern if naive
+        try:
+            ts = ts.tz_localize("America/New_York")
+        except Exception:
+            # fallback: localize to UTC then convert
+            ts = ts.tz_localize("UTC")
+    return ts.tz_convert("America/Los_Angeles")
 
 
 def get_next_earnings_date_str(ticker: str) -> str:
     """
     Returns next earnings date as 'YYYY-MM-DD' (or '' if unavailable).
-    Uses yfinance get_earnings_dates(limit=1).
-    Cached to avoid repeated calls.
+    Looks for the minimum earnings timestamp >= now (Pacific).
     """
     t = ticker.upper().replace(".", "-").strip()
     if not t:
         return ""
 
-    if t in _EARNINGS_CACHE:
-        return _EARNINGS_CACHE[t]
+    if t in _EARNINGS_NEXT_CACHE:
+        return _EARNINGS_NEXT_CACHE[t]
 
     try:
-        edf = yf.Ticker(t).get_earnings_dates(limit=1)
+        edf = _get_earnings_dates_df(t, limit=12)
         if edf is None or edf.empty:
-            _EARNINGS_CACHE[t] = ""
+            _EARNINGS_NEXT_CACHE[t] = ""
             return ""
 
-        dt = pd.to_datetime(edf.index[0])
-        out = dt.strftime("%Y-%m-%d")
-        _EARNINGS_CACHE[t] = out
+        now = _now_pacific()
+        idx = pd.to_datetime(edf.index)
+
+        # Normalize to Pacific for comparison
+        idx_pac = []
+        for v in idx:
+            try:
+                idx_pac.append(_to_pacific_ts(v))
+            except Exception:
+                pass
+        if not idx_pac:
+            _EARNINGS_NEXT_CACHE[t] = ""
+            return ""
+
+        idx_pac = pd.DatetimeIndex(idx_pac)
+        future = idx_pac[idx_pac >= now]
+        if len(future) == 0:
+            _EARNINGS_NEXT_CACHE[t] = ""
+            return ""
+
+        out = future.min().strftime("%Y-%m-%d")
+        _EARNINGS_NEXT_CACHE[t] = out
         return out
     except Exception:
-        _EARNINGS_CACHE[t] = ""
+        _EARNINGS_NEXT_CACHE[t] = ""
+        return ""
+
+
+def get_last_earnings_date_str(ticker: str, ref_date: pd.Timestamp | None = None) -> str:
+    """
+    Returns last (most recent past) earnings date as 'YYYY-MM-DD' (or '' if unavailable).
+
+    If ref_date is provided (recommended), last earnings is computed relative to end_date
+    so your backtests are stable.
+    """
+    t = ticker.upper().replace(".", "-").strip()
+    if not t:
+        return ""
+
+    ref_key = pd.to_datetime(ref_date).strftime("%Y-%m-%d") if ref_date is not None else "NOW"
+    cache_key = f"{t}|{ref_key}"
+    if cache_key in _EARNINGS_LAST_CACHE:
+        return _EARNINGS_LAST_CACHE[cache_key]
+
+    try:
+        edf = _get_earnings_dates_df(t, limit=12)
+        if edf is None or edf.empty:
+            _EARNINGS_LAST_CACHE[cache_key] = ""
+            return ""
+
+        if ref_date is None:
+            ref = _now_pacific()
+        else:
+            ref_naive = pd.to_datetime(ref_date).normalize()
+            # treat end_date as a date in Pacific; compare at end-of-day Pacific
+            ref = pd.Timestamp(ref_naive).tz_localize("America/Los_Angeles") + pd.Timedelta(hours=23, minutes=59)
+
+        idx = pd.to_datetime(edf.index)
+
+        idx_pac = []
+        for v in idx:
+            try:
+                idx_pac.append(_to_pacific_ts(v))
+            except Exception:
+                pass
+        if not idx_pac:
+            _EARNINGS_LAST_CACHE[cache_key] = ""
+            return ""
+
+        idx_pac = pd.DatetimeIndex(idx_pac)
+        past = idx_pac[idx_pac < ref]
+        if len(past) == 0:
+            _EARNINGS_LAST_CACHE[cache_key] = ""
+            return ""
+
+        out = past.max().strftime("%Y-%m-%d")
+        _EARNINGS_LAST_CACHE[cache_key] = out
+        return out
+    except Exception:
+        _EARNINGS_LAST_CACHE[cache_key] = ""
         return ""
 
 
@@ -452,29 +566,53 @@ def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Times
         print(scan_df)
         return
 
-    today = pd.to_datetime(end_date).normalize()
-    tomorrow = (today + BDay(1)).normalize()
-    red_set = {today.strftime("%Y-%m-%d"), tomorrow.strftime("%Y-%m-%d")}
+    def _row_should_be_red(r: pd.Series) -> bool:
+        bar = pd.to_datetime(r.get("BarDate", ""), errors="coerce").normalize()
+        if pd.isna(bar):
+            return False
 
-    table = scan_df.to_string(index=False)
-    lines = table.splitlines()
+        for col in ("EarningsDate", "LastEarningsDate"):
+            ed = pd.to_datetime(r.get(col, ""), errors="coerce").normalize()
+            if pd.isna(ed):
+                continue
 
-    print(lines[0])
-    if len(lines) > 1:
-        print(lines[1])
+            if bar == ed:
+                return True
+            if bar == (ed - BDay(1)).normalize():
+                return True
+            if bar == (ed + BDay(1)).normalize():
+                return True
 
-    header = lines[0]
-    col_name = "EarningsDate"
-    start = header.find(col_name)
+        return False
 
-    for line in lines[2:]:
-        is_red = False
-        if start != -1 and len(line) >= start + len(col_name):
-            earnings_text = line[start:start + len(col_name)].strip()
-            is_red = (earnings_text in red_set)
+    # Build a format string based on current columns (keeps it aligned)
+    cols = list(scan_df.columns)
 
-        if is_red:
-            print(f"\033[91m{line}\033[0m")
+    # Compute widths from header + values (no wrapping)
+    widths = {}
+    for c in cols:
+        max_len = max(len(str(c)), scan_df[c].astype(str).map(len).max())
+        widths[c] = min(max_len, 24)  # cap to avoid crazy wide columns
+
+    def fmt_row(vals: dict) -> str:
+        parts = []
+        for c in cols:
+            s = str(vals.get(c, ""))
+            if len(s) > widths[c]:
+                s = s[: widths[c] - 1] + "…"  # truncate
+            parts.append(s.ljust(widths[c]))
+        return "  ".join(parts)
+
+    # Print header
+    header = fmt_row({c: c for c in cols})
+    print(header)
+    print("-" * len(header))
+
+    # Print rows
+    for _, r in scan_df.iterrows():
+        line = fmt_row(r.to_dict())
+        if _row_should_be_red(r):
+            print(Fore.RED + line + Style.RESET_ALL)
         else:
             print(line)
 
@@ -500,6 +638,7 @@ def main() -> None:
     single_date_input = bool(date_raw)
 
     os.system("cls" if os.name == "nt" else "clear")
+    colorama_init(autoreset=True)
 
     tickers = parse_tickers(tickers_raw)
     exclude_tickers = parse_tickers(exclude_raw) if exclude_raw else []
@@ -702,7 +841,10 @@ def main() -> None:
         .sort_values(["Score"], ascending=False)
         .reset_index(drop=True)
     )
+
+    # ✅ Add BOTH next and last earnings dates
     scan_df["EarningsDate"] = scan_df["Ticker"].apply(get_next_earnings_date_str)
+    scan_df["LastEarningsDate"] = scan_df["Ticker"].apply(lambda x: get_last_earnings_date_str(x, end_date))
 
     # FILTER: TC2000_AbsRange < 80 (ONLY when date input is blank AND intraday mode is active)
     # If it's weekend/holiday, we are in daily mode and should not apply this intraday-only filter.

@@ -36,14 +36,12 @@ NEXTDAY_MIN_DOWN_PCT = -2.0
 # =============================
 VOLUME_BOOST_PCT = 25.0  # set 0 to disable
 
+
 # =============================
-# EARNINGS HIGHLIGHT
-# Make row RED if (last OR next earnings date) is:
-#   - BarDate, or
-#   - previous trading day, or
-#   - next trading day
+# ANSI COLORS (terminal)
 # =============================
-EARNINGS_LIMIT = 24  # how many earnings timestamps to request per ticker
+RED = "\033[91m"   # bright red
+RESET = "\033[0m"
 
 
 # =============================
@@ -105,88 +103,32 @@ def _extract_ohlcv(hist: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
 
 
 # =============================
-# EARNINGS HELPERS
+# EARNINGS (for red highlighting)
 # =============================
-def _norm_date(x) -> pd.Timestamp:
-    return pd.to_datetime(x).normalize()
-
-
-def get_earnings_dates_cached(
-    ticker: str,
-    cache: dict[str, list[pd.Timestamp]],
-    limit: int = EARNINGS_LIMIT,
-) -> list[pd.Timestamp]:
+def get_earnings_dates(ticker: str, limit: int = 12) -> pd.DatetimeIndex:
     """
-    Returns a sorted list of normalized earnings dates for a ticker.
-    Uses yfinance's get_earnings_dates when available.
+    Earnings dates as normalized (date-only) timestamps.
     """
-    if ticker in cache:
-        return cache[ticker]
-
-    dates: list[pd.Timestamp] = []
     try:
         tk = yf.Ticker(ticker)
-        ed = tk.get_earnings_dates(limit=limit)  # index is earnings datetimes
-        if ed is not None and not ed.empty:
-            idx = pd.to_datetime(ed.index)
-            # remove timezone if present, then normalize to date
-            try:
-                idx = idx.tz_localize(None)
-            except Exception:
-                pass
-            dates = sorted({_norm_date(d) for d in idx})
+        edf = tk.get_earnings_dates(limit=limit)  # DataFrame indexed by earnings datetime
+        if edf is None or edf.empty:
+            return pd.DatetimeIndex([])
+        idx = pd.to_datetime(edf.index).tz_localize(None).normalize()
+        return pd.DatetimeIndex(sorted(idx.unique()))
     except Exception:
-        dates = []
-
-    cache[ticker] = dates
-    return dates
+        return pd.DatetimeIndex([])
 
 
-def last_and_next_earnings(
-    earn_dates: list[pd.Timestamp],
-    bar_date: pd.Timestamp
-) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+def is_red_earn_match(bar_date: pd.Timestamp, earnings_dates: pd.DatetimeIndex) -> bool:
     """
-    last = max earnings date <= bar_date
-    next = min earnings date >= bar_date
+    True if BarDate is earnings date OR next trading day is earnings date.
     """
-    if not earn_dates:
-        return None, None
-
-    bd = _norm_date(bar_date)
-    last_e = None
-    next_e = None
-
-    for d in earn_dates:  # sorted
-        if d <= bd:
-            last_e = d
-        if d >= bd and next_e is None:
-            next_e = d
-            break
-
-    return last_e, next_e
-
-
-def earnings_hit(
-    bar_date: pd.Timestamp,
-    last_e: pd.Timestamp | None,
-    next_e: pd.Timestamp | None
-) -> bool:
-    """
-    True if bar_date is earnings date, previous trading day, or next trading day
-    relative to either last_e or next_e.
-    """
-    bd = _norm_date(bar_date)
-    bd_prev = _norm_date(bd - BDay(1))
-    bd_next = _norm_date(bd + BDay(1))
-    window = {bd_prev, bd, bd_next}
-
-    for e in (last_e, next_e):
-        if e is None:
-            continue
-        if _norm_date(e) in window:
-            return True
-    return False
+    if earnings_dates is None or len(earnings_dates) == 0:
+        return False
+    bd = pd.to_datetime(bar_date).normalize()
+    next_bd = (bd + BDay(1)).normalize()
+    return (bd in earnings_dates) or (next_bd in earnings_dates)
 
 
 # =============================
@@ -373,7 +315,7 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
 # MAIN
 # =============================
 def main() -> None:
-    tickers_raw = "A,AA,AAL,AAOI,AAON,AAPL,ABBV,ADI,AEE,AEP,AER,AFL,AI,AIG,AKAM,ALK,ALLY,ALNY,AMAT,AMD,AMGN,AMP,AMT,ANF,AON,APG,APH,APLD,APO,APP,ARRY,ARW,ASTS,ATI,AVAV,AVGO,AVT,AVY,AXP,AXTI,AZO,BA,BAC,BAH,BBY,BDX,BG,BIIB,BILL,BKNG,BLK,BMRN,BROS,BWA,C,CAH,CAMT,CARR,CAT,CB,CCL,CDNS,CF,CG,CHRW,CI,CIEN,CL,CLS,CLSK,CMI,COF,COHR,COIN,COR,CORT,COST,CPT,CRDO,CRL,CRS,CSCO,CSX,CTSH,CVX,CWAN,DAL,DASH,DBX,DELL,DHR,DKNG,DKS,DLR,DOCU,DT,DUOL,ECL,ED,EL,ELAN,ELF,ELV,EMR,EOG,EPAM,EQIX,ESTC,ETR,EXAS,EXE,EXPE,FANG,FCEL,FCX,FDS,FICO,FIG,FIS,FIVE,FIX,FLEX,FLNC,FLS,FLYW,FN,FNV,FOXA,FROG,FSLR,GE,GILD,GLW,GM,GOOG,GOOGL,GS,GTLB,HAL,HALO,HCA,HIG,HLT,HON,HOOD,HUM,HWM,IBKR,ICE,ILMN,INSM,INSP,INTC,INTU,IONQ,IONS,IOT,IQV,IR,IRM,ISRG,IT,IVZ,J,JBHT,JBL,JCI,JKHY,JPM,KEYS,KKR,KLAC,KRMN,KTOS,KVYO,LC,LDOS,LEU,LITE,LLY,LMT,LOW,LPLA,LRCX,LSCC,LUV,LXEO,LYFT,MA,MAA,MBLY,MCD,MCHP,MDB,MDT,META,MIDD,MIR,MKSI,MMM,MNDY,MORN,MP,MPWR,MRK,MS,MSCI,MSFT,MTB,MTN,MTSI,MTZ,MU,NBIS,NBIX,NDAQ,NEE,NEM,NET,NKE,NOC,NTNX,NTRA,NTRS,NUE,NVDA,NVT,NVTS,NXPI,NXT,OKLO,OKTA,OMC,ON,ONDS,ONTO,ORCL,OXY,PAAS,PATH,PAY,PBF,PCAR,PEGA,PEP,PFE,PG,PLD,PLNT,PLTR,PM,PNFP,PSTG,PSX,QBTS,RBLX,RDDT,RGLD,RIVN,RJF,RNG,ROK,ROKU,ROST,RTX,RUN,SATS,SBUX,SCHW,SEI,SFM,SGI,SLB,SMCI,SN,SNAP,SNDK,SNX,SRE,STE,STLD,STRL,STT,STX,SYK,SYNA,TEAM,TEL,TER,TJX,TMO,TROW,TSLA,TTD,TVTX,TXRH,U,UAL,UBER,UHS,ULTA,UNH,UPS,USAR,UUUU,V,VRT,VSH,VTRS,VTYX,W,WBD,WDC,WFC,WING,WMT,WRBY,WSM,WST,WYNN,XOM,ZM,ZS,ZTS,SKY,VSAT,AMZN,BKKT,HL,SEDG,LMND,CIFR,MGNI,MNTS,PL,RKLB,LUNR,FLY,RDW,MOS,FMC,JOBY,VFC,CRI,GAP,LULU,AEO,VSCO,URBN,OWL,CWH,CVNA,KMX,LCID,MOD,QS,AEVA,NPB,CELH,STZ,RIOT,WULF,MARA,HUT,FIGR,CE,HUN,METC,VIAV,UMAC,ANET,HPQ,OSS,QUBT,RGTI,RCAT,SOFI,UPST,M,KSS,GH,TGT,DLTR,SERV,SMR,PRGO,PCRX,AMPX,EOSE,TTMI,BE,OUST,LPTH,FLR,TIC,DECK,BIRK,SBET,SGHC,OSCR,DOCS,TEM,TXG,HIMS,PPTA,TWLO,GENI,SPOT,STUB,Z,DJT,TRIP,FUN,NCLH,REAL,CNK,PSKY,VSNT,ACHC,BRKR,RXST,TNDM,BBNX,ATEC,SOC,APA,RRC,OVV,MUR,CRK,AR,SM,LBRT,HLF,LW,BRBR,PCT,CSGP,DBRG,TWO,FRMI,COLD,HPP,PENN,CAVA,GEO,ENTG,ACMR,AEHR,AMKR,Q,ALAB,MRVL,AG,GTM,FRSH,COMP,PD,DDOG,SNOW,BTDR,MSTR,NOW,ASAN,SOUN,OS,RELY,CRWV,CORZ,RBRK,NTSK,FOUR,SOLS,KLAR,PGY,AFRM,AFRM,ENPH,AVTR,ALB,CC,OLN,ETSY,CART,CHWY,BBWI,GME,RHI,UPWK,CLF,CMCSA,RXO,VST,GEV,NRG,CEG,HE,CSIQ,MRNA,XBI,CRWD,RZLV,LAES,NUAI,LUMN,ASPI,POET,IMRX,ALT,SHLS,HTZ,TIGR,ACHR,VG,ABR,USAS,PAYO,SANA,DRIP,ULCC,NIO,JBLU,INDI,SG,BBAI,ASM,TROX,VZLA,NWL,MSOS,MNKD,BCRX,BW,BTG,COUR,SLDP,BULL,CRMD,AUR,RIG,PTEN,TLRY,NUVB,FSLY,DUST,TDOC,TSHA,MQ,CRGY,TSDD,ENVX,GDXD,NVAX,TMQ,TGB,UNIT,HIMZ,RXRX,LAR,UAA,ABCL,UA,NEXT,SLI,TE,OPEN,MSTX,MUD,TZA,BORR,BMNG,BMNU,UAMY,TMC,LAC,BFLY,PGEN,NVD,GRAB,NB,XRPT,SOLT,CRCA,ABAT,TSM,,EXK,RKT,IREN,SHOP,TECK,UEC,PAGS,BMNR,NXE,NU,GFS,ZIM,ZETA,STNE,EBAY,CVE,QXO,XP,AES,VISN,FLG,BN,WT,BZ,LYB,AS,ABNB,CNQ,TXN,DD,NOV,SU,ALM,DXCM,CALY,BKR,SW,DHI,SYF,PINS,CRM,CNH,IBM,PYPL,CRBG,CNC,S,CMG,VLO,WY,FTV,QCOM,BX,TSCO,CCI,PGR,PRMB,MGY,SWKS,TOST,FAST,NEOG,CVS,JBS,PK,ACI,PANW,HOG,PR,ONON,ADBE,WDAY,ADM,DOC,DVN,GPK,HRL,CPRT,HD,OKE,AMCR,MKC,CPNG,HBAN,DG,AMH,COP,DOW,INVH,SIRI,XRAY,BAX,KR,EQT,CTRA,FLO,IP,CPB,CAG"
+    tickers_raw = "ceg"
 
     start_raw = input("StartDate YYYY-MM-DD (or 02/23/2026): ").strip()
     end_raw = input("EndDate   YYYY-MM-DD (or 02/26/2026): ").strip()
@@ -404,10 +346,14 @@ def main() -> None:
     if start_date > end_date:
         raise SystemExit("❌ StartDate must be <= EndDate.")
 
+    # Build earnings map once (so we can color rows later)
+    earnings_map: dict[str, pd.DatetimeIndex] = {}
+    for t in tickers:
+        earnings_map[t] = get_earnings_dates(t, limit=12)
+
     spy_close = download_spy_close(end_date)
     hist_map = download_many(tickers, end_date)
 
-    earnings_cache: dict[str, list[pd.Timestamp]] = {}
     scan_rows: list[dict] = []
 
     for t in tickers:
@@ -417,9 +363,6 @@ def main() -> None:
 
         feats = add_features(df)
         feats = add_relative_strength(feats, spy_close)
-
-        # Fetch earnings dates once per ticker (cached)
-        earn_dates = get_earnings_dates_cached(t, earnings_cache, limit=EARNINGS_LIMIT)
 
         scan_dates = feats.index[(feats.index >= start_date) & (feats.index <= end_date)]
         if len(scan_dates) == 0:
@@ -460,15 +403,11 @@ def main() -> None:
             if not (np.isfinite(dayret) and dayret >= MIN_SIGNAL_DAY_PCT):
                 continue
 
-            # Earnings columns + coloring flag (does NOT affect scoring/filtering)
-            last_e, next_e = last_and_next_earnings(earn_dates, bar_date)
-            is_earn_red = earnings_hit(bar_date, last_e, next_e)
+            red_earn = is_red_earn_match(bar_date, earnings_map.get(t))
 
             scan_rows.append({
                 "Ticker": t,
                 "BarDate": bar_date.strftime("%Y-%m-%d"),
-                "LastEarningsDate": "" if last_e is None else last_e.strftime("%Y-%m-%d"),
-                "NextEarningsDate": "" if next_e is None else next_e.strftime("%Y-%m-%d"),
                 "SignalDay%": f"{dayret:.2f}%",
                 "NextDay%": f"{nextday_pct:.2f}%",
                 "Score": score,
@@ -476,7 +415,7 @@ def main() -> None:
                 "Bonus": bonus,
                 "Close": safe(feats.iloc[i].get("Close", np.nan)),
                 "TC2000_AbsRange": round(safe(feats.iloc[i].get("TC2000_AbsRange", np.nan)), 2),
-                "EarningsRed": is_earn_red,
+                "RedEarnings": bool(red_earn),  # <-- used only for coloring
             })
 
     if not scan_rows:
@@ -489,20 +428,16 @@ def main() -> None:
         .reset_index(drop=True)
     )
 
-    # ===== output (manual header + row printing) with RED rows on earnings proximity =====
-    RED = "\033[91m"
-    RESET = "\033[0m"
+    # Color rows red if BarDate == EarningsDate OR BarDate+1BDay == EarningsDate
+    display_df = scan_df.drop(columns=["RedEarnings"], errors="ignore")
 
-    # Hide the boolean column but still use it for coloring:
-    display_cols = [c for c in scan_df.columns if c != "EarningsRed"]
-
-    header = "  ".join(display_cols)
+    header = "  ".join(display_df.columns)
     print(header)
     print("-" * len(header))
 
-    for _, r in scan_df.iterrows():
-        row_text = "  ".join(str(r[c]) for c in display_cols)
-        if bool(r.get("EarningsRed", False)):
+    for idx, r in display_df.iterrows():
+        row_text = "  ".join(str(r[c]) for c in display_df.columns)
+        if bool(scan_df.loc[idx, "RedEarnings"]):
             print(f"{RED}{row_text}{RESET}")
         else:
             print(row_text)
