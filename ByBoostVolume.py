@@ -54,6 +54,40 @@ USE_LAST_COMPLETED_INTRADAY_BAR = True  # recommended for stability
 # =============================
 VOLUME_BOOST_PCT = 25.0  # set 0 to disable
 
+def downtrend_warning(feats: pd.DataFrame, i: int) -> str:
+    """
+    Returns a warning label if the chart is in a downtrend.
+    Uses simple, robust daily-structure checks.
+    """
+
+    # Need enough history
+    if i < 60:
+        return ""
+
+    # Current / prior values
+    c = safe(feats.iloc[i].get("Close", np.nan))
+    sma50 = safe(feats.iloc[i].get("SMA50", np.nan))
+    sma50s = safe(feats.iloc[i].get("SMA50Slope", np.nan))
+
+    # Swing-high / swing-low style approximation:
+    # Compare last ~20 trading days high/low range to the prior ~20.
+    recent_high = safe(feats["High"].iloc[i-19:i+1].max())
+    recent_low  = safe(feats["Low"].iloc[i-19:i+1].min())
+    prior_high  = safe(feats["High"].iloc[i-39:i-19].max())
+    prior_low   = safe(feats["Low"].iloc[i-39:i-19].min())
+
+    # Conditions (tuneable)
+    cond_price_below_sma = (np.isfinite(c) and np.isfinite(sma50) and c < sma50)
+    cond_sma_falling     = (np.isfinite(sma50s) and sma50s < 0)
+    cond_lower_range     = (np.isfinite(recent_high) and np.isfinite(prior_high) and recent_high < prior_high) and \
+                           (np.isfinite(recent_low) and np.isfinite(prior_low) and recent_low < prior_low)
+
+    # If 2 of 3 are true, call it downtrend
+    hits = sum([cond_price_below_sma, cond_sma_falling, cond_lower_range])
+
+    if hits >= 2:
+        return "⚠ Downtrend"
+    return ""
 
 # =============================
 # BASIC HELPERS
@@ -611,8 +645,16 @@ def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Times
     # Print rows
     for _, r in scan_df.iterrows():
         line = fmt_row(r.to_dict())
-        if _row_should_be_red(r):
+
+        is_earnings = _row_should_be_red(r)
+        is_downtrend = "Downtrend" in str(r.get("Warning", ""))
+
+        if is_earnings and is_downtrend:
+            print(Fore.MAGENTA + line + Style.RESET_ALL)
+        elif is_earnings:
             print(Fore.RED + line + Style.RESET_ALL)
+        elif is_downtrend:
+            print(Fore.YELLOW + line + Style.RESET_ALL)
         else:
             print(line)
 
@@ -803,6 +845,7 @@ def main() -> None:
             "Bonus": bonus,
             "Close": safe(row_for_score.get("Close", np.nan)),
             "TC2000_AbsRange": round(safe(row_for_score.get("TC2000_AbsRange", np.nan)), 2),
+            "Warning": downtrend_warning(feats, i),
         })
 
     # write today's skip file at end of first run (NO DATE INPUT ONLY)
