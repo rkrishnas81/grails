@@ -645,6 +645,9 @@ def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Times
     print("-" * len(header))
 
     # Print rows
+    normal_rows = []
+    color_rows = []
+
     for _, r in scan_df.iterrows():
         line = fmt_row(r.to_dict())
 
@@ -652,13 +655,21 @@ def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Times
         is_downtrend = "Downtrend" in str(r.get("Warning", ""))
 
         if is_earnings and is_downtrend:
-            print(Fore.MAGENTA + line + Style.RESET_ALL)
+            color_rows.append((Fore.MAGENTA, line))
         elif is_earnings:
-            print(Fore.RED + line + Style.RESET_ALL)
+            color_rows.append((Fore.RED, line))
         elif is_downtrend:
-            print(Fore.YELLOW + line + Style.RESET_ALL)
+            color_rows.append((Fore.YELLOW, line))
         else:
-            print(line)
+            normal_rows.append(line)
+
+    # print normal rows first
+    for line in normal_rows:
+        print(line)
+
+    # then print colored rows
+    for color, line in color_rows:
+        print(color + line + Style.RESET_ALL)
 
 
 # =============================
@@ -845,7 +856,7 @@ def main() -> None:
             "Score": score,
             "BaseScore": base,
             "Bonus": bonus,
-            "Close": safe(row_for_score.get("Close", np.nan)),
+            "Close": round(safe(row_for_score.get("Close", np.nan)), 2),
             "TC2000_AbsRange": round(safe(row_for_score.get("TC2000_AbsRange", np.nan)), 2),
             "Warning": downtrend_warning(feats, i),
         })
