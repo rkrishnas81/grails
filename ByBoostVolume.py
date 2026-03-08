@@ -601,14 +601,16 @@ def print_scan_with_earnings_highlight(scan_df: pd.DataFrame, end_date: pd.Times
         return
 
     def _row_should_be_red(r: pd.Series) -> bool:
-        bar = pd.to_datetime(r.get("BarDate", ""), errors="coerce").normalize()
+        bar = pd.to_datetime(r.get("BarDate", ""), errors="coerce")
         if pd.isna(bar):
             return False
+        bar = bar.normalize()
 
         for col in ("EarningsDate", "LastEarningsDate"):
-            ed = pd.to_datetime(r.get(col, ""), errors="coerce").normalize()
+            ed = pd.to_datetime(r.get(col, ""), errors="coerce")
             if pd.isna(ed):
                 continue
+            ed = ed.normalize()
 
             if bar == ed:
                 return True
