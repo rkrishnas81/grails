@@ -31,8 +31,8 @@ NEXTDAY_MIN_UP_PCT = 2.0
 NEXTDAY_MIN_DOWN_PCT = -2.0
 
 # =============================
-# VOLUME BOOST (matches your example script behavior)
-# Boosts ONLY the BarDate row being scored (not historical days)
+# VOLUME BOOST
+# Boosts ONLY the BarDate row being scored
 # =============================
 VOLUME_BOOST_PCT = 25.0  # set 0 to disable
 
@@ -43,7 +43,7 @@ VOLUME_BOOST_PCT = 25.0  # set 0 to disable
 #   - previous trading day, or
 #   - next trading day
 # =============================
-EARNINGS_LIMIT = 24  # how many earnings timestamps to request per ticker
+EARNINGS_LIMIT = 12   # lowered for speed
 
 
 # =============================
@@ -126,10 +126,9 @@ def get_earnings_dates_cached(
     dates: list[pd.Timestamp] = []
     try:
         tk = yf.Ticker(ticker)
-        ed = tk.get_earnings_dates(limit=limit)  # index is earnings datetimes
+        ed = tk.get_earnings_dates(limit=limit)
         if ed is not None and not ed.empty:
             idx = pd.to_datetime(ed.index)
-            # remove timezone if present, then normalize to date
             try:
                 idx = idx.tz_localize(None)
             except Exception:
@@ -157,7 +156,7 @@ def last_and_next_earnings(
     last_e = None
     next_e = None
 
-    for d in earn_dates:  # sorted
+    for d in earn_dates:
         if d <= bd:
             last_e = d
         if d >= bd and next_e is None:
@@ -293,7 +292,7 @@ def add_relative_strength(d: pd.DataFrame, spy_close: pd.Series) -> pd.DataFrame
 
 
 # =============================
-# VOLUME BOOST (BarDate row only)
+# VOLUME BOOST
 # =============================
 def apply_volume_boost(row: pd.Series, boost_pct: float) -> pd.Series:
     if boost_pct is None or boost_pct == 0:
@@ -370,10 +369,65 @@ def confirmation_bonus(d: pd.DataFrame, i: int) -> float:
 
 
 # =============================
+# PRINT HELPER
+# =============================
+def print_scan_with_earnings_highlight(scan_df: pd.DataFrame):
+    if scan_df.empty:
+        print(scan_df)
+        return
+
+    RED = "\033[91m"
+    RESET = "\033[0m"
+
+    cols = [c for c in scan_df.columns if c != "EarningsRed"]
+
+    print_df = scan_df.copy()
+
+    if "Close" in print_df.columns:
+        print_df["Close"] = print_df["Close"].map(lambda x: f"{float(x):.2f}" if pd.notna(x) else "")
+    if "Score" in print_df.columns:
+        print_df["Score"] = print_df["Score"].map(lambda x: f"{float(x):.1f}" if pd.notna(x) else "")
+    if "BaseScore" in print_df.columns:
+        print_df["BaseScore"] = print_df["BaseScore"].map(lambda x: f"{float(x):.1f}" if pd.notna(x) else "")
+    if "Bonus" in print_df.columns:
+        print_df["Bonus"] = print_df["Bonus"].map(lambda x: f"{float(x):.1f}" if pd.notna(x) else "")
+    if "TC2000_AbsRange" in print_df.columns:
+        print_df["TC2000_AbsRange"] = print_df["TC2000_AbsRange"].map(
+            lambda x: f"{float(x):.2f}" if pd.notna(x) else ""
+        )
+
+    widths = {}
+    for c in cols:
+        max_len = max(len(str(c)), print_df[c].astype(str).map(len).max())
+        widths[c] = min(max_len, 24)
+
+    def fmt_row(vals: dict) -> str:
+        parts = []
+        for c in cols:
+            s = str(vals.get(c, ""))
+            if len(s) > widths[c]:
+                s = s[: widths[c] - 1] + "…"
+            parts.append(s.ljust(widths[c]))
+        return "  ".join(parts)
+
+    header = fmt_row({c: c for c in cols})
+    print(header)
+    print("-" * len(header))
+
+    for idx, r in print_df.iterrows():
+        line = fmt_row(r.to_dict())
+        is_red = bool(scan_df.iloc[idx].get("EarningsRed", False))
+        if is_red:
+            print(f"{RED}{line}{RESET}")
+        else:
+            print(line)
+
+
+# =============================
 # MAIN
 # =============================
 def main() -> None:
-    tickers_raw = "A,AA,AAL,AAOI,AAON,AAPL,ABBV,ADI,AEE,AEP,AER,AFL,AI,AIG,AKAM,ALK,ALLY,ALNY,AMAT,AMD,AMGN,AMP,AMT,ANF,AON,APG,APH,APLD,APO,APP,ARRY,ARW,ASTS,ATI,AVAV,AVGO,AVT,AVY,AXP,AXTI,AZO,BA,BAC,BAH,BBY,BDX,BG,BIIB,BILL,BKNG,BLK,BMRN,BROS,BWA,C,CAH,CAMT,CARR,CAT,CB,CCL,CDNS,CF,CG,CHRW,CI,CIEN,CL,CLS,CLSK,CMI,COF,COHR,COIN,COR,CORT,COST,CPT,CRDO,CRL,CRS,CSCO,CSX,CTSH,CVX,CWAN,DAL,DASH,DBX,DELL,DHR,DKNG,DKS,DLR,DOCU,DT,DUOL,ECL,ED,EL,ELAN,ELF,ELV,EMR,EOG,EPAM,EQIX,ESTC,ETR,EXAS,EXE,EXPE,FANG,FCEL,FCX,FDS,FICO,FIG,FIS,FIVE,FIX,FLEX,FLNC,FLS,FLYW,FN,FNV,FOXA,FROG,FSLR,GE,GILD,GLW,GM,GOOG,GOOGL,GS,GTLB,HAL,HALO,HCA,HIG,HLT,HON,HOOD,HUM,HWM,IBKR,ICE,ILMN,INSM,INSP,INTC,INTU,IONQ,IONS,IOT,IQV,IR,IRM,ISRG,IT,IVZ,J,JBHT,JBL,JCI,JKHY,JPM,KEYS,KKR,KLAC,KRMN,KTOS,KVYO,LC,LDOS,LEU,LITE,LLY,LMT,LOW,LPLA,LRCX,LSCC,LUV,LXEO,LYFT,MA,MAA,MBLY,MCD,MCHP,MDB,MDT,META,MIDD,MIR,MKSI,MMM,MNDY,MORN,MP,MPWR,MRK,MS,MSCI,MSFT,MTB,MTN,MTSI,MTZ,MU,NBIS,NBIX,NDAQ,NEE,NEM,NET,NKE,NOC,NTNX,NTRA,NTRS,NUE,NVDA,NVT,NVTS,NXPI,NXT,OKLO,OKTA,OMC,ON,ONDS,ONTO,ORCL,OXY,PAAS,PATH,PAY,PBF,PCAR,PEGA,PEP,PFE,PG,PLD,PLNT,PLTR,PM,PNFP,PSTG,PSX,QBTS,RBLX,RDDT,RGLD,RIVN,RJF,RNG,ROK,ROKU,ROST,RTX,RUN,SATS,SBUX,SCHW,SEI,SFM,SGI,SLB,SMCI,SN,SNAP,SNDK,SNX,SRE,STE,STLD,STRL,STT,STX,SYK,SYNA,TEAM,TEL,TER,TJX,TMO,TROW,TSLA,TTD,TVTX,TXRH,U,UAL,UBER,UHS,ULTA,UNH,UPS,USAR,UUUU,V,VRT,VSH,VTRS,VTYX,W,WBD,WDC,WFC,WING,WMT,WRBY,WSM,WST,WYNN,XOM,ZM,ZS,ZTS,SKY,VSAT,AMZN,BKKT,HL,SEDG,LMND,CIFR,MGNI,MNTS,PL,RKLB,LUNR,FLY,RDW,MOS,FMC,JOBY,VFC,CRI,GAP,LULU,AEO,VSCO,URBN,OWL,CWH,CVNA,KMX,LCID,MOD,QS,AEVA,NPB,CELH,STZ,RIOT,WULF,MARA,HUT,FIGR,CE,HUN,METC,VIAV,UMAC,ANET,HPQ,OSS,QUBT,RGTI,RCAT,SOFI,UPST,M,KSS,GH,TGT,DLTR,SERV,SMR,PRGO,PCRX,AMPX,EOSE,TTMI,BE,OUST,LPTH,FLR,TIC,DECK,BIRK,SBET,SGHC,OSCR,DOCS,TEM,TXG,HIMS,PPTA,TWLO,GENI,SPOT,STUB,Z,DJT,TRIP,FUN,NCLH,REAL,CNK,PSKY,VSNT,ACHC,BRKR,RXST,TNDM,BBNX,ATEC,SOC,APA,RRC,OVV,MUR,CRK,AR,SM,LBRT,HLF,LW,BRBR,PCT,CSGP,DBRG,TWO,FRMI,COLD,HPP,PENN,CAVA,GEO,ENTG,ACMR,AEHR,AMKR,Q,ALAB,MRVL,AG,GTM,FRSH,COMP,PD,DDOG,SNOW,BTDR,MSTR,NOW,ASAN,SOUN,OS,RELY,CRWV,CORZ,RBRK,NTSK,FOUR,SOLS,KLAR,PGY,AFRM,AFRM,ENPH,AVTR,ALB,CC,OLN,ETSY,CART,CHWY,BBWI,GME,RHI,UPWK,CLF,CMCSA,RXO,VST,GEV,NRG,CEG,HE,CSIQ,MRNA,XBI,CRWD,RZLV,LAES,NUAI,LUMN,ASPI,POET,IMRX,ALT,SHLS,HTZ,TIGR,ACHR,VG,ABR,USAS,PAYO,SANA,DRIP,ULCC,NIO,JBLU,INDI,SG,BBAI,ASM,TROX,VZLA,NWL,MSOS,MNKD,BCRX,BW,BTG,COUR,SLDP,BULL,CRMD,AUR,RIG,PTEN,TLRY,NUVB,FSLY,DUST,TDOC,TSHA,MQ,CRGY,TSDD,ENVX,GDXD,NVAX,TMQ,TGB,UNIT,HIMZ,RXRX,LAR,UAA,ABCL,UA,NEXT,SLI,TE,OPEN,MSTX,MUD,TZA,BORR,BMNG,BMNU,UAMY,TMC,LAC,BFLY,PGEN,NVD,GRAB,NB,XRPT,SOLT,CRCA,ABAT,TSM,,EXK,RKT,IREN,SHOP,TECK,UEC,PAGS,BMNR,NXE,NU,GFS,ZIM,ZETA,STNE,EBAY,CVE,QXO,XP,AES,VISN,FLG,BN,WT,BZ,LYB,AS,ABNB,CNQ,TXN,DD,NOV,SU,ALM,DXCM,CALY,BKR,SW,DHI,SYF,PINS,CRM,CNH,IBM,PYPL,CRBG,CNC,S,CMG,VLO,WY,FTV,QCOM,BX,TSCO,CCI,PGR,PRMB,MGY,SWKS,TOST,FAST,NEOG,CVS,JBS,PK,ACI,PANW,HOG,PR,ONON,ADBE,WDAY,ADM,DOC,DVN,GPK,HRL,CPRT,HD,OKE,AMCR,MKC,CPNG,HBAN,DG,AMH,COP,DOW,INVH,SIRI,XRAY,BAX,KR,EQT,CTRA,FLO,IP,CPB,CAG"
+    tickers_raw = "A,AA,AAL,AAOI,AAON,AAPL,ABBV,ADI,AEE,AEP,AER,AFL,AI,AIG,AKAM,ALK,ALLY,ALNY,AMAT,AMD,AMGN,AMP,AMT,ANF,AON,APG,APH,APLD,APO,APP,ARRY,ARW,ASTS,ATI,AVAV,AVGO,AVT,AVY,AXP,AXTI,AZO,BA,BAC,BAH,BBY,BDX,BG,BIIB,BILL,BKNG,BLK,BMRN,BROS,BWA,C,CAH,CAMT,CARR,CAT,CB,CCL,CDNS,CF,CG,CHRW,CI,CIEN,CL,CLS,CLSK,CMI,COF,COHR,COIN,COR,CORT,COST,CPT,CRDO,CRL,CRS,CSCO,CSX,CTSH,CVX,CWAN,DAL,DASH,DBX,DELL,DHR,DKNG,DKS,DLR,DOCU,DT,DUOL,ECL,ED,EL,ELAN,ELF,ELV,EMR,EOG,EPAM,EQIX,ESTC,ETR,EXAS,EXE,EXPE,FANG,FCEL,FCX,FDS,FICO,FIG,FIS,FIVE,FIX,FLEX,FLNC,FLS,FLYW,FN,FNV,FOXA,FROG,FSLR,GE,GILD,GLW,GM,GOOG,GOOGL,GS,GTLB,HAL,HALO,HCA,HIG,HLT,HON,HOOD,HUM,HWM,IBKR,ICE,ILMN,INSM,INSP,INTC,INTU,IONQ,IONS,IOT,IQV,IR,IRM,ISRG,IT,IVZ,J,JBHT,JBL,JCI,JKHY,JPM,KEYS,KKR,KLAC,KRMN,KTOS,KVYO,LC,LDOS,LEU,LITE,LLY,LMT,LOW,LPLA,LRCX,LSCC,LUV,LXEO,LYFT,MA,MAA,MBLY,MCD,MCHP,MDB,MDT,META,MIDD,MIR,MKSI,MMM,MNDY,MORN,MP,MPWR,MRK,MS,MSCI,MSFT,MTB,MTN,MTSI,MTZ,MU,NBIS,NBIX,NDAQ,NEE,NEM,NET,NKE,NOC,NTNX,NTRA,NTRS,NUE,NVDA,NVT,NVTS,NXPI,NXT,OKLO,OKTA,OMC,ON,ONDS,ONTO,ORCL,OXY,PAAS,PATH,PAY,PBF,PCAR,PEGA,PEP,PFE,PG,PLD,PLNT,PLTR,PM,PNFP,PSTG,PSX,QBTS,RBLX,RDDT,RGLD,RIVN,RJF,RNG,ROK,ROKU,ROST,RTX,RUN,SATS,SBUX,SCHW,SEI,SFM,SGI,SLB,SMCI,SN,SNAP,SNDK,SNX,SRE,STE,STLD,STRL,STT,STX,SYK,SYNA,TEAM,TEL,TER,TJX,TMO,TROW,TSLA,TTD,TVTX,TXRH,U,UAL,UBER,UHS,ULTA,UNH,UPS,USAR,UUUU,V,VRT,VSH,VTRS,VTYX,W,WBD,WDC,WFC,WING,WMT,WRBY,WSM,WST,WYNN,XOM,ZM,ZS,ZTS,SKY,VSAT,AMZN,BKKT,HL,SEDG,LMND,CIFR,MGNI,MNTS,PL,RKLB,LUNR,FLY,RDW,MOS,FMC,JOBY,VFC,CRI,GAP,LULU,AEO,VSCO,URBN,OWL,CWH,CVNA,KMX,LCID,MOD,QS,AEVA,NPB,CELH,STZ,RIOT,WULF,MARA,HUT,FIGR,CE,HUN,METC,VIAV,UMAC,ANET,HPQ,OSS,QUBT,RGTI,RCAT,SOFI,UPST,M,KSS,GH,TGT,DLTR,SERV,SMR,PRGO,PCRX,AMPX,EOSE,TTMI,BE,OUST,LPTH,FLR,TIC,DECK,BIRK,SBET,SGHC,OSCR,DOCS,TEM,TXG,HIMS,PPTA,TWLO,GENI,SPOT,STUB,Z,DJT,TRIP,FUN,NCLH,REAL,CNK,PSKY,VSNT,ACHC,BRKR,RXST,TNDM,BBNX,ATEC,SOC,APA,RRC,OVV,MUR,CRK,AR,SM,LBRT,HLF,LW,BRBR,PCT,CSGP,DBRG,TWO,FRMI,COLD,HPP,PENN,CAVA,GEO,ENTG,ACMR,AEHR,AMKR,Q,ALAB,MRVL,AG,GTM,FRSH,COMP,PD,DDOG,SNOW,BTDR,MSTR,NOW,ASAN,SOUN,OS,RELY,CRWV,CORZ,RBRK,NTSK,FOUR,SOLS,KLAR,PGY,AFRM,AFRM,ENPH,AVTR,ALB,CC,OLN,ETSY,CART,CHWY,BBWI,GME,RHI,UPWK,CLF,CMCSA,RXO,VST,GEV,NRG,CEG,HE,CSIQ,MRNA,XBI,CRWD,RZLV,LAES,NUAI,LUMN,ASPI,POET,IMRX,ALT,SHLS,HTZ,TIGR,ACHR,VG,ABR,USAS,PAYO,SANA,DRIP,ULCC,NIO,JBLU,INDI,SG,BBAI,ASM,TROX,VZLA,NWL,MSOS,MNKD,BCRX,BW,BTG,COUR,SLDP,BULL,CRMD,AUR,RIG,PTEN,TLRY,NUVB,FSLY,DUST,TDOC,TSHA,MQ,CRGY,TSDD,ENVX,GDXD,NVAX,TMQ,TGB,UNIT,HIMZ,RXRX,LAR,UAA,ABCL,UA,NEXT,SLI,TE,OPEN,MSTX,MUD,TZA,BORR,BMNG,BMNU,UAMY,TMC,LAC,BFLY,PGEN,GRAB,NB,XRPT,SOLT,CRCA,ABAT,TSM,,EXK,RKT,IREN,SHOP,TECK,UEC,PAGS,BMNR,NXE,NU,GFS,ZIM,ZETA,STNE,EBAY,CVE,QXO,XP,AES,VISN,FLG,BN,WT,BZ,LYB,AS,ABNB,CNQ,TXN,DD,NOV,SU,ALM,DXCM,CALY,BKR,SW,DHI,SYF,PINS,CRM,CNH,IBM,PYPL,CRBG,CNC,S,CMG,VLO,WY,FTV,QCOM,BX,TSCO,CCI,PGR,PRMB,MGY,SWKS,TOST,FAST,NEOG,CVS,JBS,PK,ACI,PANW,HOG,PR,ONON,ADBE,WDAY,ADM,DOC,DVN,GPK,HRL,CPRT,HD,OKE,AMCR,MKC,CPNG,HBAN,DG,AMH,COP,DOW,INVH,SIRI,XRAY,BAX,KR,EQT,CTRA,FLO,IP,CPB,CAG"
 
     start_raw = input("StartDate YYYY-MM-DD (or 02/23/2026): ").strip()
     end_raw = input("EndDate   YYYY-MM-DD (or 02/26/2026): ").strip()
@@ -407,7 +461,6 @@ def main() -> None:
     spy_close = download_spy_close(end_date)
     hist_map = download_many(tickers, end_date)
 
-    earnings_cache: dict[str, list[pd.Timestamp]] = {}
     scan_rows: list[dict] = []
 
     for t in tickers:
@@ -417,9 +470,6 @@ def main() -> None:
 
         feats = add_features(df)
         feats = add_relative_strength(feats, spy_close)
-
-        # Fetch earnings dates once per ticker (cached)
-        earn_dates = get_earnings_dates_cached(t, earnings_cache, limit=EARNINGS_LIMIT)
 
         scan_dates = feats.index[(feats.index >= start_date) & (feats.index <= end_date)]
         if len(scan_dates) == 0:
@@ -460,15 +510,9 @@ def main() -> None:
             if not (np.isfinite(dayret) and dayret >= MIN_SIGNAL_DAY_PCT):
                 continue
 
-            # Earnings columns + coloring flag (does NOT affect scoring/filtering)
-            last_e, next_e = last_and_next_earnings(earn_dates, bar_date)
-            is_earn_red = earnings_hit(bar_date, last_e, next_e)
-
             scan_rows.append({
                 "Ticker": t,
-                "BarDate": bar_date.strftime("%Y-%m-%d"),
-                "LastEarningsDate": "" if last_e is None else last_e.strftime("%Y-%m-%d"),
-                "NextEarningsDate": "" if next_e is None else next_e.strftime("%Y-%m-%d"),
+                "BarDate": pd.to_datetime(bar_date).normalize(),
                 "SignalDay%": f"{dayret:.2f}%",
                 "NextDay%": f"{nextday_pct:.2f}%",
                 "Score": score,
@@ -476,7 +520,6 @@ def main() -> None:
                 "Bonus": bonus,
                 "Close": safe(feats.iloc[i].get("Close", np.nan)),
                 "TC2000_AbsRange": round(safe(feats.iloc[i].get("TC2000_AbsRange", np.nan)), 2),
-                "EarningsRed": is_earn_red,
             })
 
     if not scan_rows:
@@ -489,23 +532,48 @@ def main() -> None:
         .reset_index(drop=True)
     )
 
-    # ===== output (manual header + row printing) with RED rows on earnings proximity =====
-    RED = "\033[91m"
-    RESET = "\033[0m"
+    # Earnings fetched ONLY for matched rows
+    earnings_cache: dict[str, list[pd.Timestamp]] = {}
 
-    # Hide the boolean column but still use it for coloring:
-    display_cols = [c for c in scan_df.columns if c != "EarningsRed"]
-
-    header = "  ".join(display_cols)
-    print(header)
-    print("-" * len(header))
+    last_list = []
+    next_list = []
+    red_list = []
 
     for _, r in scan_df.iterrows():
-        row_text = "  ".join(str(r[c]) for c in display_cols)
-        if bool(r.get("EarningsRed", False)):
-            print(f"{RED}{row_text}{RESET}")
-        else:
-            print(row_text)
+        t = str(r["Ticker"])
+        bd = pd.to_datetime(r["BarDate"]).normalize()
+
+        earn_dates = get_earnings_dates_cached(t, earnings_cache, limit=EARNINGS_LIMIT)
+        last_e, next_e = last_and_next_earnings(earn_dates, bd)
+        is_red = earnings_hit(bd, last_e, next_e)
+
+        last_list.append("" if last_e is None else last_e.strftime("%Y-%m-%d"))
+        next_list.append("" if next_e is None else next_e.strftime("%Y-%m-%d"))
+        red_list.append(is_red)
+
+    scan_df["LastEarningsDate"] = last_list
+    scan_df["NextEarningsDate"] = next_list
+    scan_df["EarningsRed"] = red_list
+    scan_df["BarDate"] = pd.to_datetime(scan_df["BarDate"]).dt.strftime("%Y-%m-%d")
+
+    scan_df = scan_df[
+        [
+            "Ticker",
+            "BarDate",
+            "LastEarningsDate",
+            "NextEarningsDate",
+            "SignalDay%",
+            "NextDay%",
+            "Score",
+            "BaseScore",
+            "Bonus",
+            "Close",
+            "TC2000_AbsRange",
+            "EarningsRed",
+        ]
+    ]
+
+    print_scan_with_earnings_highlight(scan_df)
 
 
 if __name__ == "__main__":
